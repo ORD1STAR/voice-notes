@@ -1,0 +1,15 @@
+[Unit]
+Description=Voice Notes
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/voice-notes
+# Put GROQ_API_KEY=... in this file (mode 600), one variable per line.
+EnvironmentFile=/etc/voice-notes.env
+ExecStart=/opt/voice-notes/.venv/bin/python -m app
+Restart=on-failure
+User=voicenotes
+
+[Install]
+WantedBy=multi-user.target
