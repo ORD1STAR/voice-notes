@@ -21,7 +21,7 @@ UNICODE_JOB = {
     **JOB,
     "notes": {
         "title": "Réunion: café, naïve, 日本語, “quotes”",
-        "summary": "Résumé avec des accents et un tiret – long.",
+        "summary": "Résumé avec des accents et un tiret - long.",
         "sections": [{"heading": "Été", "bullets": ["Ça fonctionne très bien", "Prix: 5 €"]}],
     },
 }

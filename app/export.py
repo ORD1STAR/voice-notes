@@ -164,7 +164,7 @@ def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
             y = pdf.get_y()
             pdf.set_text_color(*ACCENT)
             pdf.set_x(pdf.l_margin)
-            pdf.cell(indent, 5.6, "-" if not pdf.uni else "–")
+            pdf.cell(indent, 5.6, "-" if not pdf.uni else "-")
             pdf.set_text_color(*INK)
             pdf.set_xy(pdf.l_margin + indent, y)
             pdf.multi_cell(width - indent, 5.6, t(b), new_x="LMARGIN", new_y="NEXT")
