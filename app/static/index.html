@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Voice Notes</title>
+  <meta name="description" content="Upload a voice note and get a transcript and structured notes you can export as PDF, text or Markdown.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+
+  <header class="top">
+    <a class="brand" href="#/" id="brand">Voice Notes</a>
+    <p class="engine" id="engine-line" aria-live="polite"></p>
+  </header>
+
+  <main id="main">
+
+    <!-- Start -->
+    <section id="view-start" aria-labelledby="start-title">
+      <h1 id="start-title" tabindex="-1">Turn a voice note into written notes</h1>
+      <p class="lede">Upload a recording of up to <span id="max-mb">200</span> MB. It is transcribed, organised into headings and bullets, and ready to export.</p>
+
+      <div id="setup-notice" class="notice" role="status" hidden></div>
+
+      <form id="upload-form" novalidate>
+        <div class="drop" id="drop">
+          <input class="file-input" type="file" id="file" name="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac,.webm,.mp4,.mkv,.amr">
+          <label for="file" class="drop-label" id="drop-label">
+            <span class="drop-title">Drop an audio file here</span>
+            <span class="drop-sub">or <span class="link-like">choose a file</span> from your device. MP3, M4A, WAV, OGG, FLAC, WebM and most video files work.</span>
+          </label>
+        </div>
+
+        <div class="picked" id="picked" hidden>
+          <div class="picked-info">
+            <span class="picked-name" id="picked-name"></span>
+            <span class="picked-size" id="picked-size"></span>
+          </div>
+          <div class="actions">
+            <button type="submit" class="btn primary" id="go">Transcribe</button>
+            <button type="button" class="btn quiet" id="clear">Remove</button>
+          </div>
+        </div>
+
+        <p class="field-error" id="file-error" role="alert" hidden></p>
+      </form>
+
+      <section class="recent" aria-labelledby="recent-title">
+        <h2 id="recent-title">Recent notes</h2>
+        <p class="empty" id="recent-empty">No notes yet. Notes you create will be listed here.</p>
+        <ul class="recent-list" id="recent-list" hidden></ul>
+      </section>
+    </section>
+
+    <!-- Progress -->
+    <section id="view-progress" aria-labelledby="progress-title" hidden>
+      <h1 id="progress-title" tabindex="-1">Working on your note</h1>
+      <p class="lede" id="progress-file"></p>
+
+      <ol class="steps" id="steps">
+        <li data-step="upload"><span class="step-name">Upload</span><span class="step-state">Waiting</span></li>
+        <li data-step="converting"><span class="step-name">Prepare the audio</span><span class="step-state">Waiting</span></li>
+        <li data-step="transcribing"><span class="step-name">Transcribe</span><span class="step-state">Waiting</span></li>
+        <li data-step="structuring"><span class="step-name">Structure the notes</span><span class="step-state">Waiting</span></li>
+      </ol>
+
+      <div class="bar" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><span id="bar-fill"></span></div>
+      <p class="detail" id="progress-detail" aria-live="polite">Starting</p>
+      <p class="hint">Long recordings take a while, mostly during structuring. You can leave this page and come back: the note will appear in your recent notes.</p>
+    </section>
+
+    <!-- Error -->
+    <section id="view-error" aria-labelledby="error-title" hidden>
+      <h1 id="error-title" tabindex="-1">This note could not be created</h1>
+      <p class="error-box" id="error-message" role="alert"></p>
+      <div class="actions">
+        <button type="button" class="btn primary" id="error-retry">Try another file</button>
+      </div>
+    </section>
+
+    <!-- Result -->
+    <section id="view-result" aria-labelledby="result-title" hidden>
+      <p class="crumb"><a href="#/" id="back">All notes</a></p>
+      <h1 id="result-title" class="note-title" tabindex="-1"></h1>
+      <p class="meta" id="result-meta"></p>
+
+      <div class="toolbar">
+        <div class="export" role="group" aria-label="Export">
+          <span class="toolbar-label">Export</span>
+          <a class="btn" id="exp-pdf" href="#" download>PDF</a>
+          <a class="btn" id="exp-txt" href="#" download>Text</a>
+          <a class="btn" id="exp-md" href="#" download>Markdown</a>
+        </div>
+        <label class="check"><input type="checkbox" id="with-transcript"> Include the transcript</label>
+        <div class="toolbar-end">
+          <button type="button" class="btn quiet" id="copy">Copy notes</button>
+          <button type="button" class="btn quiet danger" id="delete">Delete</button>
+        </div>
+      </div>
+      <p class="status-line" id="copy-status" role="status" aria-live="polite"></p>
+
+      <div class="tabs" role="tablist" aria-label="Note content">
+        <button role="tab" id="tab-notes" aria-controls="panel-notes" aria-selected="true" tabindex="0">Notes</button>
+        <button role="tab" id="tab-transcript" aria-controls="panel-transcript" aria-selected="false" tabindex="-1">Transcript</button>
+      </div>
+
+      <div role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" tabindex="0">
+        <div class="summary" id="summary-block">
+          <h2>Summary</h2>
+          <p id="summary"></p>
+        </div>
+        <div id="sections"></div>
+      </div>
+      <div role="tabpanel" id="panel-transcript" aria-labelledby="tab-transcript" tabindex="0" hidden>
+        <p class="transcript" id="transcript"></p>
+      </div>
+    </section>
+
+  </main>
+
+  <footer class="foot">
+    <p>Transcription by Groq Whisper. Structuring runs on this server.</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
