@@ -71,3 +71,20 @@ def test_split_audio_makes_small_ordered_chunks(make_audio, tmp_path, monkeypatc
 def test_split_audio_single_chunk_for_short_file(make_audio, tmp_path):
     chunks = audio.split_audio(make_audio(4), tmp_path / "out")
     assert len(chunks) == 1
+
+
+def test_browser_style_webm_without_duration_is_measured(tmp_path, make_audio):
+    """MediaRecorder output has no duration in its header; the length must still be found."""
+    import subprocess
+
+    from conftest import FFMPEG
+    from app import audio
+
+    src = make_audio(4)
+    out = tmp_path / "browser.webm"
+    with open(out, "wb") as fh:  # writing to a pipe leaves the duration out of the header
+        subprocess.run([FFMPEG, "-y", "-v", "error", "-i", str(src), "-c:a", "libopus", "-f", "webm", "pipe:1"],
+                       stdout=fh, check=True)
+    info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
+    assert "Duration: N/A" in info
+    assert 3.0 < audio.probe_duration(out) < 5.5

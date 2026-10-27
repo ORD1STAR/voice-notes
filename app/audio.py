@@ -26,6 +26,29 @@ def parse_ffmpeg_info(stderr: str) -> tuple[float, bool]:
     return duration, has_audio
 
 
+_TIME = re.compile(r"time=(\d+):(\d+):(\d+(?:\.\d+)?)")
+
+
+def _decoded_duration(path: Path) -> float:
+    """Measure the length by decoding the audio.
+
+    Recordings made in a browser (WebM from MediaRecorder) carry no duration in
+    their header, so `ffmpeg -i` alone reports none.
+    """
+    try:
+        out = subprocess.run(
+            [settings.ffmpeg, "-hide_banner", "-i", str(path), "-vn", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=900, errors="replace",
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return 0.0
+    times = _TIME.findall(out.stderr)
+    if not times:
+        return 0.0
+    h, m, s = times[-1]
+    return int(h) * 3600 + int(m) * 60 + float(s)
+
+
 def probe_duration(path: Path) -> float:
     """Return the duration in seconds, or raise AudioError if there is no audio."""
     try:
@@ -42,6 +65,8 @@ def probe_duration(path: Path) -> float:
         raise AudioError("This file is not a readable audio or video file.")
     if not has_audio:
         raise AudioError("This file does not contain an audio track.")
+    if duration <= 0:
+        duration = _decoded_duration(path)
     if duration <= 0:
         raise AudioError("The audio in this file is empty.")
     return duration
