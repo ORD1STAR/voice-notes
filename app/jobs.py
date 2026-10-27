@@ -209,6 +209,64 @@ def rename(job_id: str, title: str) -> dict | None:
         return dict(job)
 
 
+def _line(value, limit: int) -> str:
+    """One line of text: control characters and runs of spaces removed, cut at `limit`."""
+    text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", str(value if value is not None else ""))
+    return re.sub(r"\s+", " ", text).strip()[:limit].strip()
+
+
+def _items(value, limit: int, cap: int, what: str) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise ValueError(f"{what} must be a list.")
+    out: list[str] = []
+    for item in value:
+        text = re.sub(r"^(?:(?:[\-\*\u2022]|\[[ xX]?\])\s+)+", "", _line(item, limit + 4))[:limit].strip()
+        if text and text.lower() not in {o.lower() for o in out}:
+            out.append(text)
+    return out[:cap]
+
+
+def edit_notes(job_id: str, raw: dict) -> dict | None:
+    """Replace the notes of a finished note with a corrected version (the reader edited the text).
+
+    Raises ValueError when the new text is unusable, returns None if the note is unknown or not finished.
+    Empty points are dropped, an empty section disappears, and at least one section must remain.
+    """
+    title = clean_title(_line(raw.get("title"), MAX_TITLE))
+    if not title:
+        raise ValueError("The title cannot be empty.")
+    if not isinstance(raw.get("sections") or [], list):
+        raise ValueError("The sections must be a list.")
+    sections = []
+    for sec in (raw.get("sections") or [])[:30]:
+        if not isinstance(sec, dict):
+            continue
+        bullets = _items(sec.get("bullets"), 600, 30, "The points")
+        if bullets:
+            sections.append({"heading": _line(sec.get("heading"), 100) or "Notes", "bullets": bullets})
+    if not sections:
+        raise ValueError("Keep at least one section with a point in it.")
+    notes = {
+        "title": title,
+        "summary": _line(raw.get("summary"), 2000),
+        "key_points": _items(raw.get("key_points"), 400, 8, "The key points"),
+        "sections": sections,
+        "actions": _items(raw.get("actions"), 300, 20, "The action items"),
+    }
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job["status"] != "done" or not job.get("notes"):
+            return None
+        if title != job["notes"].get("title"):
+            job["custom_title"] = title  # a rebuild keeps a title the user chose
+        job["notes"] = notes
+        job["edited"] = True
+        _save(job)
+        return dict(job)
+
+
 def _update(job_id: str, **fields) -> None:
     with _lock:
         job = _jobs.get(job_id)
@@ -329,7 +387,7 @@ def run(job_id: str) -> None:
                 notes = {**notes, "title": custom}
             _update(job_id, notes=notes, engine=engine, engine_detail=report.get("fallback_reason") or None,
                     status="done", stage="done", progress=1.0, detail="Done", retryable=False,
-                    restructure=False, rebuild_error=None)
+                    restructure=False, rebuild_error=None, edited=False)
         except (audio.AudioError, structure.StructureError) as exc:
             _fail(job_id, str(exc), False)
         except transcribe.TranscriptionError as exc:
