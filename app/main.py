@@ -65,6 +65,7 @@ async def security_headers(request: Request, call_next):
 def _public(job: dict) -> dict:
     """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
     out = dict(job)
+    out["pdf_problem"] = export.pdf_problem(job) if job.get("status") == "done" and job.get("notes") else None
     out["language"] = languages.lenient(job.get("language"))  # notes saved before the language field are automatic
     out["language_name"] = languages.name(out["language"])
     out["ahead"] = jobs.queue_ahead(job["id"]) if job.get("status") in ("queued", "processing") else 0
@@ -160,6 +161,26 @@ def rename_note(job_id: str, body: RenameBody):
     return _public(job)
 
 
+class EditBody(BaseModel):
+    title: str
+    summary: str = ""
+    key_points: list = []
+    actions: list = []
+    sections: list = []
+
+
+@app.put("/api/notes/{job_id}/notes")
+def edit_note(job_id: str, body: EditBody):
+    """Replace the text of a finished note with the version the reader corrected."""
+    try:
+        job = jobs.edit_notes(job_id, body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if job is None:
+        raise HTTPException(404, "This note does not exist or is not finished yet.")
+    return _public(job)
+
+
 @app.post("/api/notes/{job_id}/retry", status_code=202)
 def retry_note(job_id: str):
     if not jobs.get(job_id):
@@ -194,6 +215,10 @@ def export_note(job_id: str, format: str = "md", transcript: bool = False):
         raise HTTPException(400, "Format must be pdf, txt or md.")
     if job["status"] != "done" or not job.get("notes"):
         raise HTTPException(409, "This note is not ready yet.")
+    if format == "pdf":
+        problem = export.pdf_problem(job, transcript)
+        if problem:
+            raise HTTPException(422, problem)
     content, mime = export.render(job, format, include_transcript=transcript)
     filename = export.safe_filename(job["notes"]["title"], format)
     ascii_name = filename.encode("ascii", "ignore").decode()

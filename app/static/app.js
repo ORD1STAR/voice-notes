@@ -217,6 +217,15 @@
     return opt ? opt.textContent : code;
   }
 
+  // The language you chose last time is offered again.
+  try {
+    var savedLanguage = localStorage.getItem("vn-language");
+    if (savedLanguage && $("language").querySelector('option[value="' + savedLanguage + '"]')) $("language").value = savedLanguage;
+  } catch (x) { /* storage may be blocked */ }
+  $("language").addEventListener("change", function () {
+    try { localStorage.setItem("vn-language", $("language").value); } catch (x) { /* storage may be blocked */ }
+  });
+
   /* ---------- recording in the browser ---------- */
 
   var rec = { stream: null, recorder: null, chunks: [], started: 0, timer: null, cancelled: false };
@@ -530,6 +539,7 @@
     } else if (job.engine_detail) {
       text = job.engine_detail;
     }
+    if (job.edited) text = "";
     note.textContent = text;
     note.hidden = !text;
   }
@@ -542,6 +552,7 @@
 
   function renderResult(job) {
     currentJob = job;
+    if (editing) setEditing(false);
     var n = job.notes;
     $("result-title").textContent = n.title;
     closeRename(false);
@@ -549,7 +560,7 @@
     var language = "Language: " + (job.language_name || "Auto");
     var meta = $("result-meta");
     meta.textContent = "";
-    [job.filename, fmtDuration(job.duration), fmtDate(job.created), language, engine].filter(Boolean).forEach(function (b) {
+    [job.filename, fmtDuration(job.duration), fmtDate(job.created), language, engine, job.edited ? "Edited by you" : ""].filter(Boolean).forEach(function (b) {
       meta.appendChild(el("li", b));
     });
     $("summary").textContent = n.summary;
@@ -579,6 +590,7 @@
       ? job.transcript_paragraphs : (job.transcript ? [job.transcript] : []);
     paras.forEach(function (p) { tr.appendChild(el("p", p)); });
 
+    markDirection(job);
     $("copy-status").textContent = job.rebuild_error || "";
     selectTab("notes", false);
     updateExportLinks();
@@ -593,7 +605,24 @@
     ["pdf", "txt", "md"].forEach(function (f) {
       $("exp-" + f).href = "/api/notes/" + currentId + "/export?format=" + f + t;
     });
+    var pdf = $("exp-pdf");
+    var problem = currentJob && currentJob.pdf_problem;
+    if (problem) {
+      pdf.setAttribute("aria-disabled", "true");
+      pdf.removeAttribute("download");
+      pdf.title = problem;
+    } else {
+      pdf.removeAttribute("aria-disabled");
+      pdf.setAttribute("download", "");
+      pdf.removeAttribute("title");
+    }
   }
+  $("exp-pdf").addEventListener("click", function (e) {
+    if (currentJob && currentJob.pdf_problem) {
+      e.preventDefault();
+      $("copy-status").textContent = currentJob.pdf_problem;
+    }
+  });
   $("with-transcript").addEventListener("change", updateExportLinks);
 
   function notesAsMarkdown(job) {
@@ -694,6 +723,13 @@
     no: "Cancel", yes: "Rebuild", danger: false
   };
 
+  var REBUILD_EDITED_ASK = {
+    title: "Rebuild these notes?",
+    text: "The notes are written again from the transcript. The changes you made by hand will be replaced. " +
+      "The title you chose is kept.",
+    no: "Cancel", yes: "Rebuild", danger: true
+  };
+
   function ask(opts) {
     var d = $("confirm");
     if (typeof d.showModal !== "function") {
@@ -736,7 +772,7 @@
   $("rebuild").addEventListener("click", function () {
     if (!currentId) return;
     var id = currentId;
-    ask(REBUILD_ASK).then(function (yes) {
+    ask(currentJob && currentJob.edited ? REBUILD_EDITED_ASK : REBUILD_ASK).then(function (yes) {
       if (!yes) { $("rebuild").focus(); return null; }
       $("rebuild").disabled = true;
       return api("/api/notes/" + id + "/restructure", { method: "POST" }).then(function () {
@@ -776,6 +812,153 @@
       $("error-again").hidden = true;
     }).then(function () { $("error-again").disabled = false; });
   });
+
+  /* ---------- editing the notes ---------- */
+
+  var editing = false;
+  var editSeq = 0;
+
+  function lines(text) {
+    return text.split("\n").map(function (s) { return s.trim(); }).filter(Boolean);
+  }
+
+  function renumberSections() {
+    Array.prototype.forEach.call($("edit-sections").children, function (box, i) {
+      box.querySelector("legend").textContent = "Section " + (i + 1);
+    });
+  }
+
+  function addEditSection(heading, bullets, focus) {
+    var id = ++editSeq;
+    var box = el("fieldset", null, "edit-section");
+    box.appendChild(el("legend"));
+
+    var hl = el("label", "Heading", "edit-label");
+    hl.setAttribute("for", "edit-h-" + id);
+    var hi = el("input");
+    hi.type = "text";
+    hi.id = "edit-h-" + id;
+    hi.maxLength = 100;
+    hi.autocomplete = "off";
+    hi.setAttribute("dir", "auto");
+    hi.value = heading || "";
+
+    var bl = el("label", "Points, one per line", "edit-label");
+    bl.setAttribute("for", "edit-b-" + id);
+    var bt = el("textarea");
+    bt.id = "edit-b-" + id;
+    bt.setAttribute("dir", "auto");
+    bt.rows = Math.min(12, Math.max(3, (bullets || []).length + 1));
+    bt.value = (bullets || []).join("\n");
+
+    var rm = el("button", "Remove this section", "btn quiet danger small");
+    rm.type = "button";
+    rm.addEventListener("click", function () {
+      box.parentNode.removeChild(box);
+      renumberSections();
+      $("edit-add").focus();
+    });
+
+    [hl, hi, bl, bt, rm].forEach(function (n) { box.appendChild(n); });
+    $("edit-sections").appendChild(box);
+    renumberSections();
+    if (focus) hi.focus();
+  }
+
+  function setEditing(on) {
+    editing = on;
+    $("view-result").classList.toggle("editing", on);
+    $("edit-form").hidden = !on;
+    $("edit-notes").disabled = on;
+    $("rebuild").disabled = on;
+    if (on) closeRename(false);
+  }
+
+  function showEditError(message, field) {
+    var box = $("edit-error");
+    box.textContent = message;
+    box.hidden = false;
+    if (field) field.focus();
+  }
+
+  function startEdit() {
+    if (!currentJob || !currentJob.notes || editing) return;
+    var n = currentJob.notes;
+    $("edit-title").value = n.title || "";
+    $("edit-summary").value = n.summary || "";
+    $("edit-keypoints").value = (n.key_points || []).join("\n");
+    $("edit-actions").value = (n.actions || []).join("\n");
+    $("edit-sections").textContent = "";
+    n.sections.forEach(function (s) { addEditSection(s.heading, s.bullets, false); });
+    $("edit-error").hidden = true;
+    setEditing(true);
+    selectTab("notes", false);
+    $("edit-title").focus();
+  }
+
+  function stopEdit() {
+    setEditing(false);
+    $("edit-notes").focus();
+  }
+
+  $("edit-notes").addEventListener("click", startEdit);
+  $("edit-cancel").addEventListener("click", stopEdit);
+  $("edit-add").addEventListener("click", function () { addEditSection("", [], true); });
+  $("edit-form").addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); stopEdit(); }
+  });
+
+  $("edit-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (!currentId) return;
+    var id = currentId;
+    var title = $("edit-title").value.trim();
+    var sections = [];
+    Array.prototype.forEach.call($("edit-sections").children, function (box) {
+      sections.push({
+        heading: box.querySelector("input").value.trim(),
+        bullets: lines(box.querySelector("textarea").value)
+      });
+    });
+    if (!title) { showEditError("The title cannot be empty.", $("edit-title")); return; }
+    if (!sections.some(function (s) { return s.bullets.length > 0; })) {
+      showEditError("Keep at least one section with a point in it.", $("edit-add"));
+      return;
+    }
+    $("edit-error").hidden = true;
+    var save = $("edit-save");
+    save.disabled = true;
+    api("/api/notes/" + id + "/notes", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: title,
+        summary: $("edit-summary").value.trim(),
+        key_points: lines($("edit-keypoints").value),
+        actions: lines($("edit-actions").value),
+        sections: sections
+      })
+    }).then(function (r) { return r.json(); }).then(function (job) {
+      setEditing(false);
+      renderResult(job);
+      $("copy-status").textContent = "Changes saved.";
+      $("edit-notes").focus();
+    }).catch(function (err) {
+      showEditError(err.message);
+    }).then(function () { save.disabled = false; });
+  });
+
+  /* ---------- direction and language of the notes ---------- */
+
+  var DIR_TARGETS = "#result-title, #summary, #keypoints-list li, #actions-list li span, #sections h3, #sections li, #transcript p";
+
+  function markDirection(job) {
+    var code = job.language && job.language !== "auto" ? job.language : "";
+    ["panel-notes", "panel-transcript"].forEach(function (id) {
+      if (code) $(id).setAttribute("lang", code); else $(id).removeAttribute("lang");
+    });
+    Array.prototype.forEach.call(document.querySelectorAll(DIR_TARGETS), function (n) { n.setAttribute("dir", "auto"); });
+  }
 
   /* tabs */
   var tabs = [$("tab-notes"), $("tab-transcript")];

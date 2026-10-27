@@ -22,6 +22,37 @@ FORMATS = {
 }
 
 
+# Scripts that the bundled PDF fonts cannot draw correctly (no shaping, no right to left layout, no CJK glyphs).
+_UNDRAWABLE = (
+    ("Arabic", re.compile(r"[\u0600-\u06ff\u0750-\u077f\u08a0-\u08ff\ufb50-\ufdff\ufe70-\ufeff]")),
+    ("Hebrew", re.compile(r"[\u0590-\u05ff\ufb1d-\ufb4f]")),
+    ("Chinese, Japanese or Korean", re.compile(r"[\u1100-\u11ff\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff]")),
+    ("Thai", re.compile(r"[\u0e00-\u0e7f]")),
+    ("Indic", re.compile(r"[\u0900-\u0dff]")),
+)
+
+
+def pdf_problem(job: dict, include_transcript: bool = False) -> str | None:
+    """Why a PDF of this note would be wrong, or None. Mostly Arabic or Chinese text would come out as boxes."""
+    notes = job.get("notes") or {}
+    parts = [notes.get("title") or "", notes.get("summary") or ""]
+    parts += list(notes.get("key_points") or []) + list(notes.get("actions") or [])
+    for sec in notes.get("sections") or []:
+        parts.append(sec.get("heading") or "")
+        parts += list(sec.get("bullets") or [])
+    if include_transcript:
+        parts.append((job.get("transcript") or "")[:3000])
+    text = " ".join(parts)
+    letters = sum(1 for c in text if c.isalpha())
+    if not letters:
+        return None
+    for name, pattern in _UNDRAWABLE:
+        if len(pattern.findall(text)) / letters > 0.15:
+            return (f"The PDF cannot show {name} text yet, so it would come out as empty boxes. "
+                    "Use Markdown or Text, which keep every character.")
+    return None
+
+
 def safe_filename(title: str, ext: str) -> str:
     base = re.sub(r"[^\w\- ]+", "", title, flags=re.UNICODE).strip().replace(" ", "-").lower()
     base = re.sub(r"-{2,}", "-", base)[:60].strip("-") or "note"

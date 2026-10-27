@@ -192,6 +192,7 @@
             </div>
             <label class="check"><input type="checkbox" id="with-transcript"> With transcript</label>
             <div class="toolbar-end">
+              <button type="button" class="btn quiet" id="edit-notes" title="Correct the text of the notes">Edit notes</button>
               <button type="button" class="btn quiet" id="rebuild" title="Write the notes again from the transcript">Rebuild notes</button>
               <button type="button" class="btn quiet" id="copy">Copy notes</button>
               <button type="button" class="btn quiet danger" id="delete">Delete</button>
@@ -205,6 +206,32 @@
           </div>
 
           <div role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" tabindex="0">
+            <form class="edit-form" id="edit-form" aria-label="Edit the notes" hidden novalidate>
+              <p class="edit-intro">Correct the text, then save. Write one point per line; empty lines are dropped. The transcript is not changed.</p>
+              <div class="field">
+                <label for="edit-title">Title</label>
+                <input type="text" id="edit-title" maxlength="100" autocomplete="off" dir="auto">
+              </div>
+              <div class="field">
+                <label for="edit-summary">Summary</label>
+                <textarea id="edit-summary" rows="4" maxlength="2000" dir="auto"></textarea>
+              </div>
+              <div class="field">
+                <label for="edit-keypoints">Key points, one per line</label>
+                <textarea id="edit-keypoints" rows="3" dir="auto"></textarea>
+              </div>
+              <div class="field">
+                <label for="edit-actions">Action items, one per line</label>
+                <textarea id="edit-actions" rows="3" dir="auto"></textarea>
+              </div>
+              <div id="edit-sections"></div>
+              <button type="button" class="btn" id="edit-add">Add a section</button>
+              <p class="field-error" id="edit-error" role="alert" hidden></p>
+              <div class="edit-buttons">
+                <button type="submit" class="btn primary" id="edit-save">Save changes</button>
+                <button type="button" class="btn quiet" id="edit-cancel">Cancel</button>
+              </div>
+            </form>
             <div class="summary" id="summary-block">
               <h2 class="eyebrow">Summary</h2>
               <p id="summary"></p>

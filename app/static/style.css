@@ -625,6 +625,62 @@ mark { background: var(--accent-soft); color: var(--ink); border-radius: 3px; pa
   max-width: 40rem;
 }
 
+/* ------------------------------------------------------- editing the notes */
+
+.edit-form { max-width: 46rem; margin: 0 0 2.5rem; }
+.edit-intro { margin: 0 0 1.5rem; max-width: 40rem; color: var(--muted); font-size: 0.95rem; }
+.edit-form .field, .edit-section { margin: 0 0 1.4rem; }
+.edit-label, .edit-form .field > label {
+  display: block;
+  margin: 0 0 0.45rem;
+  font: 600 0.72rem/1 var(--sans);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.edit-form input[type="text"], .edit-form textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  min-height: 2.75rem;
+  padding: 0.65rem 0.9rem;
+  font: 400 1rem/1.5 var(--sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+}
+.edit-form textarea { resize: vertical; min-height: 5rem; }
+.edit-form #edit-title { font: 400 1.5rem/1.25 var(--display); }
+.edit-form input[type="text"]:hover, .edit-form textarea:hover { border-color: var(--ink); }
+.edit-form input[type="text"]:focus-visible, .edit-form textarea:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+  border-color: var(--accent);
+}
+.edit-section {
+  min-inline-size: 0;
+  padding: 1rem 1.1rem 0.75rem;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+.edit-section legend { padding: 0 0.4rem; font: 600 0.8rem/1 var(--mono); color: var(--accent); }
+.edit-section input[type="text"] { margin-bottom: 1rem; }
+.edit-section .btn.small { margin-top: 0.4rem; }
+.edit-buttons { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.5rem; }
+.edit-form #edit-add { margin-top: 0.25rem; }
+
+#view-result.editing .title-row,
+#view-result.editing .rename-form,
+#view-result.editing .status-line,
+#view-result.editing #panel-notes > :not(.edit-form) { display: none; }
+
+@media (max-width: 40rem) {
+  .edit-form #edit-title { font-size: 1.3rem; }
+  .edit-buttons .btn { flex: 1 1 8rem; }
+}
+
 /* ----------------------------------------------------- small screens */
 
 @media (max-width: 40rem) {
