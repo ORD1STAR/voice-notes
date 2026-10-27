@@ -5,6 +5,9 @@ from pathlib import Path
 
 from fpdf import FPDF
 
+from . import visuals
+from .structure import paragraphs
+
 FONT_DIRS = [
     Path(__file__).resolve().parent / "fonts",
     Path("/usr/share/fonts/truetype/dejavu"),
@@ -32,6 +35,10 @@ def _date(job: dict) -> str:
         return ""
 
 
+def _transcript_paragraphs(job: dict) -> list[str]:
+    return paragraphs(job.get("transcript") or "") or []
+
+
 def to_markdown(job: dict, include_transcript: bool = False) -> str:
     notes = job["notes"]
     lines = [f"# {notes['title']}", ""]
@@ -45,7 +52,9 @@ def to_markdown(job: dict, include_transcript: bool = False) -> str:
         lines += [f"- {b}" for b in sec["bullets"]]
         lines.append("")
     if include_transcript and job.get("transcript"):
-        lines += ["## Transcript", "", job["transcript"], ""]
+        lines += ["## Transcript", ""]
+        for p in _transcript_paragraphs(job):
+            lines += [p, ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -63,16 +72,45 @@ def to_text(job: dict, include_transcript: bool = False) -> str:
         lines += [f"- {b}" for b in sec["bullets"]]
         lines.append("")
     if include_transcript and job.get("transcript"):
-        lines += ["TRANSCRIPT", "", job["transcript"], ""]
+        lines += ["TRANSCRIPT", ""]
+        for p in _transcript_paragraphs(job):
+            lines += [p, ""]
     return "\n".join(lines).rstrip() + "\n"
 
 
 # --------------------------------------------------------------------- PDF
 
-INK = (29, 31, 30)
-MUTED = (110, 112, 108)
-ACCENT = (47, 93, 80)
-RULE = (205, 200, 190)
+INK = (24, 26, 32)
+MUTED = (98, 104, 116)
+ACCENT = (36, 71, 214)
+ACCENT_SOFT = (232, 237, 252)
+RULE = (214, 218, 226)
+PAPER_TINT = (247, 248, 252)
+WHITE = (255, 255, 255)
+EDGE = (140, 152, 190)
+
+# role -> (fill, stroke, text color) for the diagram primitives
+ROLE = {
+    "center": (ACCENT, None, WHITE),
+    "center-text": (None, None, WHITE),
+    "branch": (ACCENT_SOFT, ACCENT, INK),
+    "branch-text": (None, None, INK),
+    "leaf": (WHITE, RULE, INK),
+    "leaf-text": (None, None, INK),
+    "step": (PAPER_TINT, RULE, INK),
+    "step-text": (None, None, INK),
+    "badge": (ACCENT, None, WHITE),
+    "badge-text": (None, None, WHITE),
+    "bar": (ACCENT, None, INK),
+    "label": (None, None, INK),
+    "value": (None, None, INK),
+    "edge": (None, EDGE, None),
+    "axis": (None, RULE, None),
+    "arrow": (EDGE, None, None),
+}
+
+PAGE_MARGIN = 20
+MAX_VISUAL_MM = 175
 
 
 def _find_font(name: str) -> str | None:
@@ -84,11 +122,16 @@ def _find_font(name: str) -> str | None:
 
 
 class _Pdf(FPDF):
+    footer_title = ""
+    to_latin = staticmethod(lambda s: s)
+
     def footer(self):
-        self.set_y(-14)
+        self.set_y(-13)
         self.set_font(self.sans, size=8)
         self.set_text_color(*MUTED)
-        self.cell(0, 6, str(self.page_no()), align="C")
+        half = (self.w - self.l_margin - self.r_margin) / 2
+        self.cell(half, 6, self.to_latin(self.footer_title), align="L")
+        self.cell(half, 6, f"{self.page_no()} / {{nb}}", align="R")
 
 
 def _setup_fonts(pdf: _Pdf) -> tuple[str, str]:
@@ -105,6 +148,44 @@ def _setup_fonts(pdf: _Pdf) -> tuple[str, str]:
     return "helvetica", "times"
 
 
+def _draw_visual(pdf: _Pdf, vis: dict, x0: float, y0: float, width: float, scale: float, sans: str, t) -> None:
+    """Draw a diagram (wide layout) with its top left corner at (x0, y0), in millimetres."""
+    lay = vis["layouts"]["wide"]
+    pdf.set_line_width(0.25)
+    for it in lay["items"]:
+        kind = it["t"]
+        fill, stroke, color = ROLE.get(it["role"], (None, None, INK))
+        if kind == "rect":
+            x, y, w, h = x0 + it["x"] * scale, y0 + it["y"] * scale, it["w"] * scale, it["h"] * scale
+            if fill:
+                pdf.set_fill_color(*fill)
+            if stroke:
+                pdf.set_draw_color(*stroke)
+            style = "DF" if fill and stroke else "F" if fill else "D"
+            pdf.rect(x, y, w, h, style=style, round_corners=True, corner_radius=min(it["r"] * scale, h / 2))
+        elif kind == "circle":
+            r = it["r"] * scale
+            pdf.set_fill_color(*fill)
+            pdf.ellipse(x0 + it["x"] * scale - r, y0 + it["y"] * scale - r, 2 * r, 2 * r, style="F")
+        elif kind == "line":
+            pdf.set_draw_color(*(stroke or EDGE))
+            pts = [(x0 + px * scale, y0 + py * scale) for px, py in it["pts"]]
+            pdf.set_line_width(0.3)
+            pdf.polyline(pts)
+        elif kind == "arrow":
+            pdf.set_fill_color(*(fill or EDGE))
+            pts = [(x0 + px * scale, y0 + py * scale) for px, py in it["pts"]]
+            pdf.polyline(pts, polygon=True, style="F")
+        elif kind == "text":
+            pdf.set_font(sans, "B" if it["bold"] else "", it["size"] * scale * 72 / 25.4)
+            pdf.set_text_color(*(color or INK))
+            txt = t(it["text"])
+            x = x0 + it["x"] * scale
+            if it["anchor"] == "middle":
+                x -= pdf.get_string_width(txt) / 2
+            pdf.text(x, y0 + it["y"] * scale, txt)
+
+
 def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
     notes = job["notes"]
     pdf = _Pdf(format="A4", unit="mm")
@@ -116,58 +197,134 @@ def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
             return text
         return text.encode("latin-1", "replace").decode("latin-1")
 
-    pdf.set_margins(22, 22, 22)
+    pdf.to_latin = t
+    pdf.footer_title = notes["title"] if len(notes["title"]) <= 70 else notes["title"][:67].rstrip() + "..."
+    pdf.alias_nb_pages()
+    pdf.set_margins(PAGE_MARGIN, 20, PAGE_MARGIN)
     pdf.set_auto_page_break(True, margin=20)
     pdf.set_title(notes["title"])
     pdf.set_author("Voice Notes")
     pdf.add_page()
     width = pdf.w - pdf.l_margin - pdf.r_margin
+    left = pdf.l_margin
 
+    # Masthead
+    pdf.set_font(sans, "B", 8)
+    pdf.set_text_color(*ACCENT)
+    pdf.set_char_spacing(1.2)
+    pdf.cell(width / 2, 5, t("VOICE NOTES"), align="L")
+    pdf.set_char_spacing(0)
+    pdf.set_font(sans, size=8)
+    pdf.set_text_color(*MUTED)
+    pdf.cell(width / 2, 5, t(_date(job)), align="R", new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
     pdf.set_text_color(*INK)
-    pdf.set_font(serif, "B", 21)
-    pdf.multi_cell(width, 9, t(notes["title"]), new_x="LMARGIN", new_y="NEXT")
-    meta = "  |  ".join(x for x in (_date(job), job.get("filename", "")) if x)
-    if meta:
+    pdf.set_font(serif, "B", 22)
+    pdf.multi_cell(width, 9.5, t(notes["title"]), align="L", new_x="LMARGIN", new_y="NEXT")
+    if job.get("filename"):
         pdf.ln(1)
         pdf.set_font(sans, size=8.5)
         pdf.set_text_color(*MUTED)
-        pdf.multi_cell(width, 5, t(meta), new_x="LMARGIN", new_y="NEXT")
+        pdf.multi_cell(width, 5, t(job["filename"]), align="L", new_x="LMARGIN", new_y="NEXT")
     pdf.ln(3)
+    pdf.set_draw_color(*ACCENT)
+    pdf.set_line_width(0.8)
+    pdf.line(left, pdf.get_y(), left + 22, pdf.get_y())
     pdf.set_draw_color(*RULE)
-    pdf.set_line_width(0.3)
-    pdf.line(pdf.l_margin, pdf.get_y(), pdf.w - pdf.r_margin, pdf.get_y())
-    pdf.ln(7)
+    pdf.set_line_width(0.25)
+    pdf.line(left + 22, pdf.get_y(), left + width, pdf.get_y())
+    pdf.ln(8)
 
     def label(text: str):
         pdf.set_font(sans, "B", 8)
         pdf.set_text_color(*ACCENT)
+        pdf.set_char_spacing(1.0)
         pdf.cell(0, 5, t(text.upper()), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_char_spacing(0)
         pdf.ln(1.5)
 
+    # Summary in a tinted panel
     if notes.get("summary"):
-        label("Summary")
+        pad = 5
+        pdf.set_font(serif, size=11)
+        text_h = pdf.multi_cell(width - 2 * pad - 1, 6, t(notes["summary"]), align="L", dry_run=True, output="HEIGHT")
+        box_h = text_h + 2 * pad + 6
+        if pdf.will_page_break(box_h):
+            pdf.add_page()
+        y = pdf.get_y()
+        pdf.set_fill_color(*ACCENT_SOFT)
+        pdf.rect(left, y, width, box_h, style="F")
+        pdf.set_fill_color(*ACCENT)
+        pdf.rect(left, y, 1.2, box_h, style="F")
+        pdf.set_xy(left + pad + 1, y + pad)
+        pdf.set_font(sans, "B", 7.5)
+        pdf.set_text_color(*ACCENT)
+        pdf.set_char_spacing(1.0)
+        pdf.cell(0, 4, t("SUMMARY"), new_x="LEFT", new_y="NEXT")
+        pdf.set_char_spacing(0)
+        pdf.set_x(left + pad + 1)
         pdf.set_font(serif, size=11)
         pdf.set_text_color(*INK)
-        pdf.multi_cell(width, 6, t(notes["summary"]), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(7)
+        pdf.multi_cell(width - 2 * pad - 1, 6, t(notes["summary"]), align="L", new_x="LMARGIN", new_y="NEXT")
+        pdf.set_y(y + box_h + 9)
 
+    # Diagrams
+    vis_list = visuals.build_visuals(notes)
+    if vis_list:
+        label("At a glance")
+        pdf.ln(1)
+        for vis in vis_list:
+            lay = vis["layouts"]["wide"]
+            scale = width / lay["w"]
+            if lay["h"] * scale > MAX_VISUAL_MM:
+                scale = MAX_VISUAL_MM / lay["h"]
+            draw_w = lay["w"] * scale
+            h = lay["h"] * scale
+            head_h = 11
+            if pdf.will_page_break(head_h + h + 4):
+                pdf.add_page()
+            pdf.set_font(sans, "B", 9.5)
+            pdf.set_text_color(*INK)
+            pdf.cell(0, 5, t(vis["title"]), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font(sans, size=8)
+            pdf.set_text_color(*MUTED)
+            pdf.cell(0, 4.5, t(vis["caption"]), new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(3)
+            y = pdf.get_y()
+            _draw_visual(pdf, vis, left + (width - draw_w) / 2, y, width, scale, sans, t)
+            pdf.set_y(y + h + 9)
+        pdf.ln(1)
+
+    # Sections
     indent = 6
-    for sec in notes["sections"]:
-        if pdf.get_y() > pdf.h - 55:
+    for n, sec in enumerate(notes["sections"], 1):
+        pdf.set_font(serif, "B", 13)
+        head_h = pdf.multi_cell(width - 12, 7, t(sec["heading"]), align="L", dry_run=True, output="HEIGHT")
+        pdf.set_font(sans, size=10)
+        first_h = pdf.multi_cell(width - indent, 5.6, t(sec["bullets"][0]), align="L", dry_run=True, output="HEIGHT")
+        if pdf.will_page_break(head_h + first_h + 6):
             pdf.add_page()
+        y = pdf.get_y()
+        pdf.set_font(sans, "B", 8)
+        pdf.set_text_color(*ACCENT)
+        pdf.set_xy(left, y + 1.2)
+        pdf.cell(12, 5, f"{n:02d}")
         pdf.set_font(serif, "B", 13)
         pdf.set_text_color(*INK)
-        pdf.multi_cell(width, 7, t(sec["heading"]), new_x="LMARGIN", new_y="NEXT")
+        pdf.set_xy(left + 12, y)
+        pdf.multi_cell(width - 12, 7, t(sec["heading"]), align="L", new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1.5)
         pdf.set_font(sans, size=10)
         for b in sec["bullets"]:
+            h = pdf.multi_cell(width - indent, 5.6, t(b), align="L", dry_run=True, output="HEIGHT")
+            if pdf.will_page_break(h):
+                pdf.add_page()
             y = pdf.get_y()
-            pdf.set_text_color(*ACCENT)
-            pdf.set_x(pdf.l_margin)
-            pdf.cell(indent, 5.6, "-" if not pdf.uni else "-")
+            pdf.set_fill_color(*ACCENT)
+            pdf.ellipse(left + 1.2, y + 2.0, 1.6, 1.6, style="F")
             pdf.set_text_color(*INK)
-            pdf.set_xy(pdf.l_margin + indent, y)
-            pdf.multi_cell(width - indent, 5.6, t(b), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_xy(left + indent, y)
+            pdf.multi_cell(width - indent, 5.6, t(b), align="L", new_x="LMARGIN", new_y="NEXT")
             pdf.ln(1.2)
         pdf.ln(5)
 
@@ -176,7 +333,9 @@ def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
         label("Transcript")
         pdf.set_font(sans, size=9.5)
         pdf.set_text_color(*INK)
-        pdf.multi_cell(width, 5.4, t(job["transcript"]), new_x="LMARGIN", new_y="NEXT")
+        for p in _transcript_paragraphs(job):
+            pdf.multi_cell(width, 5.4, t(p), align="L", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(3)
 
     return bytes(pdf.output())
 
