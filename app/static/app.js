@@ -90,7 +90,20 @@
 
   /* ---------- health, structuring method and engine line ---------- */
 
+  function backupText(plan) {
+    var b = plan && plan.backup;
+    if (b && b.engine && b.engine.indexOf("ollama:") === 0) return "the local model " + b.model + " takes over";
+    return "the built-in rules take over";
+  }
+
   function methodText(plan) {
+    if (plan && plan.engine && plan.engine.indexOf("groq:") === 0) {
+      return {
+        title: "Notes are written by Groq " + plan.model,
+        text: "What you said is rewritten into clean notes that you can share, in the language of the recording. " +
+          "If Groq cannot be reached, " + backupText(plan) + "."
+      };
+    }
     if (plan && plan.engine && plan.engine.indexOf("ollama:") === 0) {
       return {
         title: "Notes are written by the local model " + plan.model,
@@ -119,7 +132,11 @@
       maxBytes = h.max_upload_mb * 1024 * 1024;
       $("max-mb").textContent = h.max_upload_mb;
       var o = h.ollama || {};
+      var g = h.groq_chat || {};
       var structuring = o.available ? "local model " + o.model : "rule-based structuring";
+      if (g.enabled) {
+        structuring = "Groq " + g.model + ", " + (o.available ? "local model " + o.model : "built-in rules") + " as backup";
+      }
       $("engine-line").textContent = "Transcription: Groq Whisper. Structuring: " + structuring + ".";
       showMethod("method", h.structuring);
 
@@ -185,11 +202,20 @@
   });
   // A click anywhere on the idle drop area opens the file picker.
   $("drop-idle").addEventListener("click", function (e) {
-    if (e.target.closest("button, label, a, input")) return;
+    if (e.target.closest("button, label, a, input, select")) return;
     $("file").click();
   });
   window.addEventListener("dragover", function (e) { e.preventDefault(); });
   window.addEventListener("drop", function (e) { e.preventDefault(); });
+
+  /* ---------- language of the recording ---------- */
+
+  function currentLanguage() { return $("language").value || "auto"; }
+
+  function languageLabel(code) {
+    var opt = $("language").querySelector('option[value="' + code + '"]');
+    return opt ? opt.textContent : code;
+  }
 
   /* ---------- recording in the browser ---------- */
 
@@ -286,7 +312,9 @@
     uploading = true;
     updateGo();
     stopPolling();
-    $("progress-file").textContent = file.name + " (" + fmtSize(file.size) + ")";
+    var lang = currentLanguage();
+    $("progress-file").textContent = file.name + " (" + fmtSize(file.size) + ")" +
+      (lang !== "auto" ? ", " + languageLabel(lang) : "");
     $("progress-elapsed").textContent = "";
     elapsed.at = 0;
     showMethod("progress-method", health && health.structuring);
@@ -297,6 +325,7 @@
 
     var form = new FormData();
     form.append("file", file);
+    form.append("language", lang);
     var xhr = new XMLHttpRequest();
     xhr.open("POST", "/api/notes");
     xhr.upload.onprogress = function (ev) {
@@ -492,13 +521,23 @@
     var plan = job.plan || {};
     var text = "";
     if (job.engine === "rule-based") {
-      text = "These notes were built with the built-in rules. " + (plan.reason ? plan.reason + " " : "") +
-        "Sentences are kept close to the wording of the recording. Install Ollama and a model for rewritten notes.";
+      text = job.engine_detail
+        ? job.engine_detail + " Sentences are kept close to the wording of the recording."
+        : "These notes were built with the built-in rules. " + (plan.reason ? plan.reason + " " : "") +
+          "Sentences are kept close to the wording of the recording. Install Ollama and a model for rewritten notes.";
     } else if (job.engine && job.engine.indexOf("partly") > 0) {
-      text = "The local model could not handle every part of this recording, so some sections were built with the built-in rules.";
+      text = "The model could not handle every part of this recording, so some sections were built with the built-in rules.";
+    } else if (job.engine_detail) {
+      text = job.engine_detail;
     }
     note.textContent = text;
     note.hidden = !text;
+  }
+
+  function engineLabel(engine) {
+    if (engine && engine.indexOf("groq:") === 0) return "Structured with Groq " + engine.slice(5);
+    if (engine && engine.indexOf("ollama:") === 0) return "Structured with " + engine.slice(7);
+    return "Structured with rules";
   }
 
   function renderResult(job) {
@@ -506,12 +545,11 @@
     var n = job.notes;
     $("result-title").textContent = n.title;
     closeRename(false);
-    var engine = job.engine && job.engine.indexOf("ollama:") === 0
-      ? "Structured with " + job.engine.slice(7)
-      : "Structured with rules";
+    var engine = engineLabel(job.engine);
+    var language = "Language: " + (job.language_name || "Auto");
     var meta = $("result-meta");
     meta.textContent = "";
-    [job.filename, fmtDuration(job.duration), fmtDate(job.created), engine].filter(Boolean).forEach(function (b) {
+    [job.filename, fmtDuration(job.duration), fmtDate(job.created), language, engine].filter(Boolean).forEach(function (b) {
       meta.appendChild(el("li", b));
     });
     $("summary").textContent = n.summary;
