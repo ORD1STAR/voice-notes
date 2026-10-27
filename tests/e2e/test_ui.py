@@ -48,6 +48,9 @@ def stack(tmp_path_factory):
         OLLAMA_HOST_URL=f"http://127.0.0.1:{fake.server_port}",
         OLLAMA_MODEL="qwen2.5:1.5b",
         USE_OLLAMA="1",
+        USE_GROQ_CHAT="0",  # these tests cover the local model and the rules; the Groq path has its own file
+        GROQ_CHAT_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/chat/completions",
+        GROQ_MODELS_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/models",
         CHUNK_SECONDS="10",
         DATA_DIR=str(data),
         FFMPEG_BIN=FFMPEG,
@@ -226,7 +229,7 @@ def test_server_error_is_shown_clearly(browser, stack, audio_file, monkeypatch):
     fake = fakes.start_fake(delay=0.0, key="a-different-key")
     port = free_port()
     env = dict(os.environ, GROQ_API_KEY="wrong-key", GROQ_API_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/audio/transcriptions",
-               USE_OLLAMA="0", DATA_DIR=str(audio_file.parent / "data2"), FFMPEG_BIN=FFMPEG,
+               USE_OLLAMA="0", USE_GROQ_CHAT="0", DATA_DIR=str(audio_file.parent / "data2"), FFMPEG_BIN=FFMPEG,
                PORT=str(port), HOST="127.0.0.1")
     proc = subprocess.Popen([sys.executable, "-m", "app"], cwd=ROOT, env=env,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

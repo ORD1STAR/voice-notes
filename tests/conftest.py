@@ -30,10 +30,20 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("GROQ_API_KEY", "test-key-not-real")
     monkeypatch.setenv("USE_OLLAMA", "0")
+    # Structuring through Groq is switched off by default and never reaches the real network in tests.
+    # Tests of that path turn it on and replace the HTTP calls.
+    monkeypatch.setenv("USE_GROQ_CHAT", "0")
+    monkeypatch.setenv("GROQ_CHAT_URL", "http://127.0.0.1:9/openai/v1/chat/completions")
+    monkeypatch.setenv("GROQ_MODELS_URL", "http://127.0.0.1:9/openai/v1/models")
+    monkeypatch.delenv("GROQ_CHAT_MODEL", raising=False)
+    monkeypatch.delenv("TRANSCRIPTION_LANGUAGE", raising=False)
     monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
     monkeypatch.delenv("CHUNK_SECONDS", raising=False)
     if FFMPEG:
         monkeypatch.setenv("FFMPEG_BIN", FFMPEG)
+    from app import structure
+
+    structure.reset_groq_cache()
     return tmp_path
 
 

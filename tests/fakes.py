@@ -4,6 +4,7 @@ They run on local ports so the real server can be exercised end to end
 without network access or an API key.
 """
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -87,13 +88,28 @@ class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/api/tags":
             self._send(200, {"models": [{"name": self.server.model}]})
+        elif self.path.endswith("/openai/v1/models"):
+            ids = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "whisper-large-v3-turbo"]
+            self._send(200, {"object": "list", "data": [{"id": i, "object": "model"} for i in ids]})
         else:
             self._send(404, {})
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
+        if self.path.endswith("/chat/completions"):
+            if self.headers.get("Authorization", "") != "Bearer " + self.server.expected_key:
+                return self._send(401, {"error": {"message": "bad key"}})
+            self.server.chat_requests.append(json.loads(raw or b"{}"))
+            if self.server.chat_fail:
+                return self._send(500, {"error": {"message": "temporary problem"}})
+            time.sleep(self.server.delay)
+            notes = dict(self.server.notes)
+            notes["action_items"] = notes.pop("actions", [])
+            return self._send(200, {"choices": [{"message": {"role": "assistant", "content": json.dumps(notes)}}]})
         if self.path.endswith("/audio/transcriptions"):
+            found = re.search(rb'name="language"\r\n\r\n([^\r]*)', raw)
+            self.server.languages.append(found.group(1).decode() if found else None)
             if self.headers.get("Authorization", "") != "Bearer " + self.server.expected_key:
                 return self._send(401, {"error": "bad key"})
             with self.server.lock:
@@ -122,6 +138,9 @@ def start_fake(delay: float = 0.0, model: str = "qwen2.5:1.5b", key: str = "test
     server.expected_key = key
     server.count = 0
     server.fail_next = 0
+    server.chat_requests = []  # bodies of the Groq chat requests
+    server.chat_fail = False  # make the Groq chat endpoint answer with an error
+    server.languages = []  # the language field of each transcription request, None when it was left out
     server.lock = threading.Lock()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server

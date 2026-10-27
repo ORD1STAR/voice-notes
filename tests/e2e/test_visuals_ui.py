@@ -33,6 +33,9 @@ def rich_stack(tmp_path_factory):
         OLLAMA_HOST_URL=f"http://127.0.0.1:{fake.server_port}",
         OLLAMA_MODEL="qwen2.5:1.5b",
         USE_OLLAMA="1",
+        USE_GROQ_CHAT="0",  # these tests cover the local model and the rules; the Groq path has its own file
+        GROQ_CHAT_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/chat/completions",
+        GROQ_MODELS_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/models",
         CHUNK_SECONDS="10",
         DATA_DIR=str(data),
         FFMPEG_BIN=FFMPEG,
