@@ -187,3 +187,150 @@ def test_mind_map_leaves_prefer_points_that_stand_alone():
     mm = visuals.mindmap_data(n)
     leaves = mm["branches"][0]["leaves"]
     assert "That is something we should fix" not in leaves and len(leaves) == 3
+
+
+# ------------------------------------------------------------------ timeline
+
+def dated(*bullets, actions=None):
+    n = note(("Plan", list(bullets)), ("B", ["x one"]), ("C", ["y two"]))
+    if actions:
+        n["actions"] = actions
+    return n
+
+
+def test_timeline_needs_three_dated_items():
+    assert visuals.timeline_data(dated("Finish the page by Friday.", "Send the copy on March 15th.")) is None
+    assert "timeline" not in by_kind(NOTES) and "timeline" not in by_kind(RICH_NOTES)
+    three = dated("Finish the page by Friday.", "Send the copy on March 15th.", "Review the budget next week.")
+    tl = visuals.timeline_data(three)
+    assert [i["when"] for i in tl["items"]] == ["Friday", "March 15th", "Next week"]
+    assert "timeline" in by_kind(three)
+
+
+def test_timeline_labels_hold_the_task_without_the_date():
+    tl = visuals.timeline_data(dated("Design finishes the landing page by Friday.", "On March 15th, marketing sends the newsletter.",
+                                     "Legal review is due before 2 April 2027."))
+    assert [i["what"] for i in tl["items"]] == ["Design finishes the landing page", "Marketing sends the newsletter", "Legal review"]
+
+
+def test_timeline_is_sorted_only_when_every_item_has_a_calendar_date():
+    n = dated("Launch on 2 April 2027.", "Freeze the content on March 15, 2027.", "Plan the party on 2027-01-10.")
+    tl = visuals.timeline_data(n)
+    assert tl["by_date"] and [i["when"] for i in tl["items"]] == ["2027-01-10", "March 15, 2027", "2 April 2027"]
+    assert by_kind(n)["timeline"]["caption"] == "In date order."
+    mixed = dated("Launch on 2 April 2027.", "Freeze the content on Friday.", "Plan the party on 2027-01-10.")
+    tl = visuals.timeline_data(mixed)
+    assert not tl["by_date"] and [i["when"] for i in tl["items"]] == ["2 April 2027", "Friday", "2027-01-10"]
+    assert by_kind(mixed)["timeline"]["caption"] == "In the order they were mentioned."
+
+
+def test_ambiguous_numeric_dates_keep_the_reading_order():
+    n = dated("Call Anna on 03/04/2026.", "Pay the bill on 25/03/2026.", "Book the room on 01/02/2026.")
+    tl = visuals.timeline_data(n)
+    assert not tl["by_date"] and [i["when"] for i in tl["items"]][0] == "03/04/2026"
+
+
+def test_habits_possessives_and_plain_words_are_not_deadlines():
+    n = dated("We meet every Monday morning.", "Sarah prepares the report for next week's review.",
+              "You may want to march on Monday, said nobody.", "Do not forget the 3/4 split.", "Version 1.2.10 is out.")
+    found = visuals.timeline_data(n)
+    assert found is None or all(i["when"] != "Every Monday" for i in found["items"])
+    assert visuals._find_when("We meet every Monday morning.") is None
+    assert visuals._find_when("Sarah prepares the report for next week's review.") is None
+    assert visuals._find_when("We may march and August is far.") is None
+    assert visuals._find_when("Mail it in May.")[2] == "May"
+    assert visuals._find_when("R\u00e9union le lundi.") is None
+    assert visuals._find_when("Fini avant lundi.")[2] == "Lundi"
+
+
+def test_timeline_in_french_and_spanish_with_their_own_wording():
+    fr = dated("Le design termine la page d'accueil avant vendredi.", "Le marketing envoie la newsletter le 15 mars.",
+               "La revue juridique est pr\u00e9vue d'ici le 2 avril 2027.", "Le budget est valid\u00e9 la semaine prochaine pour nous.")
+    fr["title"] = "Plan de lancement du site pour nous"
+    fr["summary"] = "Le site sera lanc\u00e9 bient\u00f4t et il faut que nous soyons pr\u00eats pour les clients."
+    v = by_kind(fr)["timeline"]
+    assert v["title"] == "Dates et \u00e9ch\u00e9ances" and "15 mars" in v["alt"]
+    assert by_kind(fr)["mindmap"]["title"] == "Carte mentale"
+    es = dated("El dise\u00f1o termina para el viernes.", "El correo sale el 15 de marzo de 2027.", "Entregamos el informe el mes que viene.")
+    assert [i["when"] for i in visuals.timeline_data(es)["items"]] == ["Viernes", "15 de marzo de 2027", "El mes que viene"]
+    assert visuals._find_when("Las pruebas empiezan por la ma\u00f1ana.") is None
+    assert visuals._find_when("Las pruebas empiezan ma\u00f1ana.")[2] == "Ma\u00f1ana"
+
+
+def test_timeline_reads_actions_too_and_skips_duplicates():
+    n = dated("Pay the invoice by Friday.", actions=["Pay the invoice by Friday", "Call the venue by tomorrow", "Order seeds on 2026-11-30"])
+    tl = visuals.timeline_data(n)
+    assert [i["what"] for i in tl["items"]] == ["Pay the invoice", "Call the venue", "Order seeds"]
+
+
+def test_timeline_is_capped_and_layouts_are_consistent():
+    n = dated(*[f"Task number {i} is due on {i + 1} March 2027." for i in range(12)])
+    tl = visuals.timeline_data(n)
+    assert len(tl["items"]) == visuals.MAX_TIMELINE
+    v = by_kind(n)["timeline"]
+    assert set(v["layouts"]) == {"wide", "narrow"}
+    for name, width in (("wide", visuals.WIDE), ("narrow", visuals.NARROW)):
+        lay = v["layouts"][name]
+        assert lay["w"] == width and lay["h"] > 0
+        rects = [i for i in lay["items"] if i["t"] == "rect"]
+        texts = [i for i in lay["items"] if i["t"] == "text"]
+        assert len(rects) == 2 * visuals.MAX_TIMELINE
+        for r in rects:
+            assert r["x"] >= 0 and r["x"] + r["w"] <= width and r["y"] >= 0 and r["y"] + r["h"] <= lay["h"]
+        for t in texts:  # every line of text sits inside one of the boxes
+            w = visuals.text_width(t["text"], t["size"], t["bold"])
+            assert any(r["x"] <= t["x"] and t["x"] + w <= r["x"] + r["w"] and r["y"] <= t["y"] - t["size"] * 0.8 and t["y"] <= r["y"] + r["h"]
+                       for r in rects), t["text"]
+
+
+def test_long_dates_and_tasks_are_wrapped_inside_the_timeline_boxes():
+    n = dated("The extraordinarily long task description keeps going " + "and going " * 20 + "on 15th of September 2027.",
+              "Another one on 1 October 2027.", "A third one on 3 November 2027.")
+    v = by_kind(n)["timeline"]
+    for lay in v["layouts"].values():
+        rects = [i for i in lay["items"] if i["t"] == "rect"]
+        for t in (i for i in lay["items"] if i["t"] == "text"):
+            w = visuals.text_width(t["text"], t["size"], t["bold"])
+            assert any(r["x"] <= t["x"] and t["x"] + w <= r["x"] + r["w"] for r in rects), t["text"]
+
+
+# --------------------------------------------------------- wording per language
+
+def test_english_wording_is_unchanged():
+    v = by_kind(RICH_NOTES)
+    assert (v["mindmap"]["title"], v["flow"]["title"], v["chart"]["title"]) == ("Mind map", "Process", "Key figures")
+    assert v["chart"]["caption"] == "Values mentioned in the note, as amounts in euros."
+
+
+def test_chosen_language_decides_the_wording_even_for_short_notes():
+    v = by_kind_lang(RICH_NOTES, "fr")
+    assert v["mindmap"]["title"] == "Carte mentale" and v["flow"]["title"] == "Processus" and v["chart"]["title"] == "Chiffres cl\u00e9s"
+    assert v["flow"]["caption"] == "Launch steps"  # the section heading is the notes' own text
+    assert v["flow"]["alt"].startswith("Processus en 3")
+
+
+def by_kind_lang(notes, lang):
+    return {v["kind"]: v for v in visuals.build_visuals(notes, lang)}
+
+
+def test_units_in_values_and_captions_follow_the_language():
+    n = note(("Temps", ["Le montage prend 5 heures.", "Les tests prennent 12 heures.", "La revue prend 3 heures."]),
+             ("B", ["x"]), ("C", ["y"]))
+    chart = visuals.chart_data(n, "fr")
+    assert chart["items"][0]["text"] == "5 heures"
+    assert visuals.chart_data(n, "en")["items"][0]["text"] == "5 hours"
+    assert "(heures)" in by_kind_lang(n, "fr")["chart"]["caption"]
+
+
+def test_generic_flow_caption_is_translated():
+    spread = note(("A", ["First, open the file."]), ("B", ["Then edit the text."]), ("C", ["Finally save it."]))
+    assert by_kind_lang(spread, "en")["flow"]["caption"] == "The steps in the order they were described."
+    assert by_kind_lang(spread, "es")["flow"]["caption"] == "Los pasos en el orden en que se describieron."
+
+
+def test_every_language_has_every_diagram_word():
+    from app import languages
+
+    for code in languages.NATIVE_NAMES:
+        for key in languages._EN:
+            assert languages.text(key, code), (code, key)

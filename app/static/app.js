@@ -2,8 +2,10 @@
   "use strict";
 
   var $ = function (id) { return document.getElementById(id); };
-  var views = { start: $("view-start"), progress: $("view-progress"), error: $("view-error"), result: $("view-result") };
-  var focusTargets = { start: "start-title", progress: "progress-title", error: "error-title", result: "result-title" };
+  var views = { start: $("view-start"), progress: $("view-progress"), error: $("view-error"), result: $("view-result"),
+    missing: $("view-missing") };
+  var focusTargets = { start: "start-title", progress: "progress-title", error: "error-title", result: "result-title",
+    missing: "missing-title" };
 
   var health = null;
   var maxBytes = 200 * 1024 * 1024;
@@ -16,6 +18,21 @@
   var searchQuery = "";
   var listRequest = 0;
   var elapsed = { base: 0, at: 0, label: "" };
+  var baseTitle = "Voice Notes";
+  var unseenCount = 0;     // finished notes that were not opened yet
+  var pendingSeen = null;  // a note that finished while the tab was in the background
+  var lastItems = [];
+  var listTimer = null;
+
+  // /n/<id> is the share link: the same page, showing one note full screen and read only.
+  var focusMatch = /^\/n\/([^\/]*)\/?$/.exec(location.pathname);
+  var focusMode = !!focusMatch;
+  var focusId = null;
+  if (focusMatch) { try { focusId = decodeURIComponent(focusMatch[1]); } catch (x) { focusId = ""; } }
+  if (focusMode) {
+    document.body.classList.add("focus");
+    $("focus-bar").hidden = false;
+  }
 
   var STEP_ORDER = ["upload", "converting", "transcribing", "structuring"];
   var AUDIO_EXT = /\.(mp3|m4a|wav|ogg|oga|opus|flac|aac|webm|mp4|m4v|mov|mkv|amr|3gp|wma|aiff?)$/i;
@@ -26,11 +43,24 @@
   function show(name, focus) {
     Object.keys(views).forEach(function (k) { views[k].hidden = k !== name; });
     document.body.setAttribute("data-view", name);
+    $("loading").hidden = true;
     if (focus !== false) {
       var el = $(focusTargets[name]);
       if (el) { el.focus({ preventScroll: true }); window.scrollTo(0, 0); }
     }
   }
+
+  function showLoading() {
+    Object.keys(views).forEach(function (k) { views[k].hidden = true; });
+    document.body.setAttribute("data-view", "loading");
+    $("loading").hidden = false;
+  }
+
+  function applyTitle() {
+    document.title = (unseenCount > 0 && !focusMode ? "(" + unseenCount + ") " : "") + baseTitle;
+  }
+
+  function setTitle(t) { baseTitle = t; applyTitle(); }
 
   function fmtSize(bytes) {
     if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + " MB";
@@ -312,6 +342,7 @@
 
   $("upload-form").addEventListener("submit", function (e) {
     e.preventDefault();
+    if (uploading) return;
     var msg = validate(selected);
     if (msg) { setSelected(null); $("file-error").hidden = false; $("file-error").textContent = msg; return; }
     startUpload(selected);
@@ -330,6 +361,7 @@
     setSteps("upload", "Uploading");
     setBar(0, false);
     $("progress-detail").textContent = "Uploading 0%";
+    setLeaveHint("uploading");
     show("progress");
 
     var form = new FormData();
@@ -341,7 +373,8 @@
       if (!ev.lengthComputable) return;
       var pct = Math.round((ev.loaded / ev.total) * 100);
       setBar(pct * 0.1, false);
-      $("progress-detail").textContent = pct < 100 ? "Uploading " + pct + "%" : "Upload finished, starting";
+      $("progress-detail").textContent = pct < 100 ? "Uploading " + pct + "%" : "Upload sent, waiting for the server to confirm";
+      setLeaveHint(pct < 100 ? "uploading" : "confirming");
       setStepState("upload", pct < 100 ? "Uploading " + pct + "%" : "Done");
     };
     xhr.onload = function () {
@@ -365,6 +398,23 @@
   }
 
   /* ---------- progress view ---------- */
+
+  // Leaving while the file is still being sent would lose the note, so the browser asks first.
+  window.addEventListener("beforeunload", function (e) {
+    if (!uploading) return undefined;
+    e.preventDefault();
+    e.returnValue = "";
+    return "";
+  });
+
+  var LEAVE_TEXT = {
+    uploading: "Keep this tab open until the upload has finished. After that you can close it: the note is prepared on the server.",
+    confirming: "Almost there. Keep this tab open for a moment while the server confirms the upload.",
+    saved: "The recording is safe on the server. You can close this tab: the note keeps being prepared and shows up in your list with a light blue dot when it is ready.",
+    shared: "This note is still being prepared. This page updates by itself when it is ready."
+  };
+
+  function setLeaveHint(kind) { $("leave-text").textContent = LEAVE_TEXT[kind]; }
 
   function setBar(pct, indeterminate) {
     var bar = $("bar");
@@ -399,6 +449,7 @@
 
   function renderProgress(job) {
     $("progress-file").textContent = job.filename;
+    setLeaveHint(focusMode ? "shared" : "saved");
     var queued = job.stage === "queued";
     var stage = queued ? "converting" : job.stage;
     setSteps(stage, queued ? "Queued" : "In progress");
@@ -595,8 +646,8 @@
     selectTab("notes", false);
     updateExportLinks();
     show("result");
-    document.title = n.title + " - Voice Notes";
-    loadRecent();
+    setTitle(n.title + " - Voice Notes");
+    markSeen(job.id);
   }
 
   function updateExportLinks() {
@@ -646,23 +697,50 @@
     return out.join("\n");
   }
 
-  $("copy").addEventListener("click", function () {
-    if (!currentJob) return;
-    var text = notesAsMarkdown(currentJob);
-    var done = function () { $("copy-status").textContent = "Notes copied to the clipboard."; };
-    var fail = function () { $("copy-status").textContent = "Copy is not available here. Use an export instead."; };
-    if (navigator.clipboard && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(done, fail);
-    } else {
+  // Copies text with the clipboard API, or a hidden textarea where that is not allowed (plain http).
+  function copyText(text, okMsg, failMsg, after) {
+    var status = $("copy-status");
+    var done = function () { status.textContent = okMsg; if (after) after(); };
+    var fail = function () { status.textContent = failMsg; };
+    function fallback() {
       var ta = el("textarea");
       ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.setAttribute("aria-hidden", "true");
       ta.style.position = "fixed"; ta.style.opacity = "0";
       document.body.appendChild(ta);
       ta.select();
       try { document.execCommand("copy") ? done() : fail(); } catch (x) { fail(); }
       document.body.removeChild(ta);
     }
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, fallback);
+    } else {
+      fallback();
+    }
+  }
+
+  $("copy").addEventListener("click", function () {
+    if (!currentJob) return;
+    copyText(notesAsMarkdown(currentJob), "Notes copied to the clipboard.", "Copy is not available here. Use an export instead.");
   });
+
+  /* ---------- share link ---------- */
+
+  var shareTimer = null;
+
+  function copyLink() {
+    if (!currentId) return;
+    var url = location.origin + "/n/" + currentId;
+    copyText(url, "Link copied.", "Copy is not available here. The link is " + url, function () {
+      var top = $("share-top");
+      top.textContent = "Link copied";
+      clearTimeout(shareTimer);
+      shareTimer = setTimeout(function () { top.textContent = "Copy link"; }, 2500);
+    });
+  }
+  $("share").addEventListener("click", copyLink);
+  $("share-top").addEventListener("click", copyLink);
 
   /* ---------- renaming ---------- */
 
@@ -699,7 +777,7 @@
     }).then(function (r) { return r.json(); }).then(function (job) {
       currentJob.notes.title = job.notes.title;
       $("result-title").textContent = job.notes.title;
-      document.title = job.notes.title + " - Voice Notes";
+      setTitle(job.notes.title + " - Voice Notes");
       closeRename(true);
       $("copy-status").textContent = "Renamed.";
       loadRecent();
@@ -1000,8 +1078,18 @@
     return frag;
   }
 
+  // The note on screen is being read right now, so it never gets a dot.
+  function isWatching(id) {
+    return id === currentId && !document.hidden && (!views.result.hidden || !views.progress.hidden);
+  }
+
   function fillList(list, empty, items) {
     var terms = searchTerms();
+    var sig = JSON.stringify([items, currentId, searchQuery, isWatching(currentId)]);
+    if (list.sig === sig) return;  // nothing changed: leave the rows (and the keyboard focus in them) alone
+    list.sig = sig;
+    var active = document.activeElement;
+    var keep = active && list.contains(active) ? active.getAttribute("data-id") : null;
     list.textContent = "";
     empty.textContent = terms.length ? "No notes match \"" + searchQuery.trim() + "\"." :
       (list.id === "side-list" ? "Nothing here yet." : "No notes yet. Notes you create will be listed here.");
@@ -1011,18 +1099,30 @@
       var li = el("li");
       var a = el("a", null, "row");
       a.href = "#/note/" + it.id;
+      a.setAttribute("data-id", it.id);
       if (it.id === currentId) a.setAttribute("aria-current", "page");
       var title = it.status === "done" ? (it.title || it.filename) : it.filename;
       var t = el("span", null, "row-title");
+      t.setAttribute("dir", "auto");
       t.appendChild(highlight(title, terms));
       a.appendChild(t);
       var state, bad = false;
       if (it.status === "done") state = fmtShortDate(it.created);
       else if (it.status === "error") { state = "Failed"; bad = true; }
       else state = "Working";
-      a.appendChild(el("span", state, "row-meta" + (bad ? " bad" : "")));
+      var meta = el("span", null, "row-meta" + (bad ? " bad" : ""));
+      if (it.unseen && !isWatching(it.id)) {
+        var dot = el("span", null, "dot");
+        dot.setAttribute("role", "img");
+        dot.setAttribute("aria-label", "New, not opened yet");
+        dot.title = "New, not opened yet";
+        meta.appendChild(dot);
+      }
+      meta.appendChild(document.createTextNode(state));
+      a.appendChild(meta);
       if (terms.length && it.snippet) {
         var sn = el("span", null, "row-snippet");
+        sn.setAttribute("dir", "auto");
         sn.appendChild(highlight(it.snippet, terms));
         a.appendChild(sn);
       } else {
@@ -1032,19 +1132,53 @@
       li.appendChild(a);
       list.appendChild(li);
     });
+    if (keep) {
+      Array.prototype.some.call(list.querySelectorAll("a.row"), function (a) {
+        if (a.getAttribute("data-id") !== keep) return false;
+        a.focus({ preventScroll: true });
+        return true;
+      });
+    }
+  }
+
+  function anyWorking() {
+    return lastItems.some(function (i) { return i.status === "queued" || i.status === "processing"; });
+  }
+
+  // The list refreshes by itself: quickly while a note is being prepared, slowly otherwise.
+  function scheduleList() {
+    clearTimeout(listTimer);
+    if (focusMode) return;
+    listTimer = setTimeout(function () {
+      if (document.hidden) scheduleList(); else loadRecent();
+    }, anyWorking() ? 4000 : 30000);
   }
 
   function loadRecent() {
+    if (focusMode) return Promise.resolve();
     var ticket = ++listRequest;
     var url = "/api/notes" + (searchQuery.trim() ? "?q=" + encodeURIComponent(searchQuery.trim()) : "");
     return api(url).then(function (r) { return r.json(); }).then(function (items) {
       if (ticket !== listRequest) return; // a newer search is already on its way
-      items = items.slice(0, 60);
-      fillList($("recent-list"), $("recent-empty"), items);
-      fillList($("side-list"), $("side-empty"), items);
-      $("search-status").textContent = searchQuery.trim()
+      lastItems = items;
+      var shown = items.slice(0, 60);
+      fillList($("recent-list"), $("recent-empty"), shown);
+      fillList($("side-list"), $("side-empty"), shown);
+      var status = searchQuery.trim()
         ? (items.length === 1 ? "1 note found" : items.length + " notes found") : "";
-    }).catch(function () { /* the lists are optional */ });
+      if ($("search-status").textContent !== status) $("search-status").textContent = status;
+      if (!searchQuery.trim()) {
+        unseenCount = items.filter(function (i) { return i.unseen && !isWatching(i.id); }).length;
+        applyTitle();
+      }
+    }).catch(function () { /* the lists are optional */ }).then(scheduleList);
+  }
+
+  // Tell the server this note was opened, then refresh the list so its dot goes away.
+  function markSeen(id) {
+    if (document.hidden) { pendingSeen = id; loadRecent(); return; }
+    pendingSeen = null;
+    api("/api/notes/" + id + "/seen", { method: "POST" }).catch(function () { /* not important */ }).then(loadRecent);
   }
 
   var searchTimer = null;
@@ -1069,6 +1203,13 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
+  function showMissing() {
+    stopPolling();
+    $("share-top").hidden = true;
+    setTitle("Note not found - Voice Notes");
+    show("missing");
+  }
+
   function poll(id) {
     api("/api/notes/" + id).then(function (r) { return r.json(); }).then(function (job) {
       if (id !== currentId) return;
@@ -1084,8 +1225,17 @@
       }
     }).catch(function (err) {
       if (id !== currentId) return;
-      if (err.status === 404) { showError("This note does not exist anymore.", false, false); return; }
+      if (err.status === 404) {
+        if (focusMode) showMissing(); else showError("This note does not exist anymore.", false, false);
+        return;
+      }
       pollFailures += 1;
+      if (!views.progress.hidden) {
+        // The note keeps being prepared on the server, so keep asking (a restart can take a moment).
+        $("progress-detail").textContent = "Lost contact with the server. Trying again";
+        pollTimer = setTimeout(function () { poll(id); }, pollFailures > 6 ? 5000 : 3000);
+        return;
+      }
       if (pollFailures > 6) { showError("The server stopped answering. Reload the page to check again.", false, false); return; }
       pollTimer = setTimeout(function () { poll(id); }, 3000);
     });
@@ -1093,9 +1243,22 @@
 
   var firstRoute = true;
 
-  function route() {
+  function routeShared() {
     stopPolling();
-    document.title = "Voice Notes";
+    setTitle("Voice Notes");
+    if (!focusId || !/^[A-Za-z0-9_-]{1,64}$/.test(focusId)) { showMissing(); return; }
+    currentId = focusId;
+    pollFailures = 0;
+    elapsed.at = 0;
+    $("progress-elapsed").textContent = "";
+    showLoading();
+    poll(currentId);
+  }
+
+  function route() {
+    if (focusMode) { routeShared(); return; }
+    stopPolling();
+    setTitle("Voice Notes");
     var m = /^#\/note\/([a-f0-9]+)$/.exec(location.hash);
     if (m) {
       currentId = m[1];
@@ -1103,6 +1266,7 @@
       elapsed.at = 0;
       $("progress-elapsed").textContent = "";
       if (!health) loadHealth();
+      if (firstRoute) showLoading();  // do not flash the start page when a note is being opened
       poll(currentId);
     } else {
       currentId = null;
@@ -1119,7 +1283,15 @@
     if (location.hash && location.hash !== "#/") { location.hash = "#/"; } else { route(); }
   });
 
-  window.addEventListener("hashchange", function () { firstRoute = false; route(); });
+  window.addEventListener("hashchange", function () { if (focusMode) return; firstRoute = false; route(); });
+
+  // Coming back to the tab: the note on screen counts as opened, and the list catches up.
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) return;
+    if (pendingSeen && pendingSeen === currentId && !views.result.hidden) markSeen(pendingSeen);
+    else loadRecent();
+  });
+
   setupRecorder();
   route();
   firstRoute = false;

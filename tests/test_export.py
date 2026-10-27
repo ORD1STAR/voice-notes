@@ -208,3 +208,98 @@ def test_older_notes_get_key_points_when_exported():
     md, _ = export.render(job, "md")
     assert b"## Key points" in md
     assert "key_points" not in job["notes"]  # the stored note is not touched
+
+
+# ------------------------------------------------- wording, cover and safety
+
+def french_job(**extra):
+    return {**JOB, "language": "fr", "duration": 754.0, "notes": {
+        "title": "Plan de lancement", "summary": "Le site sera lanc\u00e9 bient\u00f4t.", "key_points": ["Tout est pr\u00eat."],
+        "actions": ["Appeler le lieu"], "sections": [{"heading": "T\u00e2ches", "bullets": ["Finir la page"]}]}, **extra}
+
+
+def test_markdown_and_text_use_the_language_of_the_note():
+    md = export.to_markdown(french_job(), include_transcript=True)
+    for heading in ("## R\u00e9sum\u00e9", "## Points cl\u00e9s", "## Actions \u00e0 mener", "## Transcription"):
+        assert heading in md
+    assert "- [ ] Appeler le lieu" in md
+    assert "Fran\u00e7ais | 13 min | meeting.m4a*" in md
+    txt = export.to_text(french_job())
+    assert "R\u00c9SUM\u00c9\n\nLe site" in txt and "[ ] Appeler le lieu" in txt and "Fran\u00e7ais | 13 min" in txt
+
+
+def test_english_exports_keep_their_headings_and_name_the_date():
+    md = export.to_markdown({**JOB, "language": "en", "created": 1_800_000_000})
+    assert "## Summary" in md and "English" in md.splitlines()[2] and "2027" in md.splitlines()[2]
+
+
+def test_a_guessed_language_is_used_when_none_was_chosen():
+    job = french_job(language="auto")
+    job["notes"] = {**job["notes"], "summary": "Nous avons une r\u00e9union pour le projet et il faut que tout soit pr\u00eat dans la semaine."}
+    assert "## R\u00e9sum\u00e9" in export.to_markdown(job)
+    unsure = {**JOB, "language": "auto"}
+    assert "## Summary" in export.to_markdown(unsure)
+
+
+def test_filenames_avoid_names_windows_refuses():
+    assert export.safe_filename("CON", "pdf") == "con-note.pdf"
+    assert export.safe_filename("Plan de lancement \u00e9t\u00e9", "md") == "plan-de-lancement-\u00e9t\u00e9.md"
+    assert export.safe_filename("a" * 200, "txt") == "a" * 60 + ".txt"
+
+
+def test_pdf_handles_odd_text_without_failing(monkeypatch):
+    odd = "Emoji \U0001F600 zero\u200bwidth\ttab \u201cquotes\u201d \u2014 \x07 " + "x" * 200
+    job = {**JOB, "notes": {**RICH_NOTES, "title": odd, "summary": odd,
+                            "sections": [{"heading": odd, "bullets": [odd]}] + RICH_NOTES["sections"]}}
+    assert export.to_pdf(job, include_transcript=True).startswith(b"%PDF-")
+    monkeypatch.setattr(export, "FONT_DIRS", [])
+    assert export.to_pdf(job).startswith(b"%PDF-")
+
+
+def test_font_glyph_filter_knows_what_the_font_can_draw():
+    path = export._find_font("DejaVuSans.ttf")
+    glyphs = export._glyph_set(path)
+    assert ord("a") in glyphs and ord("\u00e9") in glyphs and ord("\u4e2d") not in glyphs
+
+
+def test_pdf_with_very_long_title_and_odd_notes_is_valid():
+    long_title = "A very long title about the quarterly planning of the whole company " * 3
+    job = {**JOB, "notes": {**RICH_NOTES, "title": long_title}}
+    data = export.to_pdf(job)
+    assert data.startswith(b"%PDF-") and pages(data) >= 2
+    empty = {**JOB, "notes": {"title": "", "summary": "", "sections": []}}
+    assert export.to_pdf(empty).startswith(b"%PDF-")
+    assert export.to_markdown(empty).startswith("# Untitled note")
+
+
+def test_pdf_with_timeline_and_all_languages():
+    from app import visuals
+
+    n = {"title": "Plan", "summary": "s", "sections": [
+        {"heading": "A", "bullets": ["Finish the page by Friday.", "Send the copy on March 15th.", "Review the budget next week."]},
+        {"heading": "B", "bullets": ["x one"]}, {"heading": "C", "bullets": ["y two"]}]}
+    assert "timeline" in [v["kind"] for v in visuals.build_visuals(n)]
+    for lang in ("en", "fr", "es", "de", "it", "pt", "tr"):
+        assert export.to_pdf({**JOB, "language": lang, "notes": n}).startswith(b"%PDF-")
+
+
+def test_diagram_cards_always_fit_on_one_page():
+    from app import visuals
+
+    big = {"title": "Big", "summary": "s", "sections": [
+        {"heading": f"Topic {i} " + "heading " * 5, "bullets": [f"Point {j} of topic {i} about things" for j in range(4)]} for i in range(30)]}
+    for vis in visuals.build_visuals(big):
+        scale, h, card = export._visual_size(vis, 170)
+        assert card <= 257 and h <= export.MAX_VISUAL_MM
+        smallest = min(i["size"] for i in vis["layouts"]["wide"]["items"] if i["t"] == "text")
+        assert smallest * scale * 72 / 25.4 >= 6.5  # still readable on paper
+
+
+def test_pdf_footer_title_is_cut_to_fit():
+    pdf = export._Pdf(format="A4", unit="mm")
+    sans, _ = export._setup_fonts(pdf)
+    pdf.add_page()
+    pdf.set_font(sans, size=7.5)
+    cut = pdf.fit("An extremely long footer title " * 10, 100)
+    assert cut.endswith("...") and pdf.get_string_width(cut) <= 100
+    assert pdf.fit("Short", 100) == "Short"

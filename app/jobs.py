@@ -72,6 +72,7 @@ def load_all() -> None:
                     _save(job)
                 elif job.get("retryable") and not up.exists() and not job.get("transcript"):
                     job["retryable"] = False
+            job.setdefault("seen", True)  # notes from before the field existed are not flagged as new
             _jobs[job["id"]] = job
 
 
@@ -94,6 +95,7 @@ def new_job(filename: str, language: str = "auto") -> dict:
         "engine": None,
         "engine_detail": None,
         "plan": None,
+        "seen": False,  # becomes True once the note has been opened
     }
     with _lock:
         _jobs[job["id"]] = job
@@ -121,7 +123,20 @@ def queue_ahead(job_id: str) -> int:
 
 def _summary_row(j: dict) -> dict:
     return {k: j[k] for k in ("id", "filename", "created", "status", "duration")} | {
-        "title": (j.get("notes") or {}).get("title")}
+        "title": (j.get("notes") or {}).get("title"),
+        "unseen": j.get("status") == "done" and not j.get("seen", True)}
+
+
+def mark_seen(job_id: str) -> bool:
+    """Remember that the note was opened. Safe to call again. False if the note is unknown."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is None:
+            return False
+        if not job.get("seen", True):
+            job["seen"] = True
+            _save(job)
+        return True
 
 
 def _snippet(text: str, term: str, before: int = 40, after: int = 90) -> str:
@@ -295,7 +310,7 @@ def retry(job_id: str) -> bool:
         if not upload_path(job_id).exists() and not job.get("transcript"):
             return False
         job.update(status="queued", stage="queued", stage_started=time.time(), progress=0.0,
-                   detail="Waiting to start", error=None, retryable=False)
+                   detail="Waiting to start", error=None, retryable=False, seen=False)
         _save(job)
     start(job_id)
     return True
@@ -373,10 +388,11 @@ def run(job_id: str) -> None:
                    detail=(f"Waiting for {who}") if using_model
                    else "Structuring with the built-in rules")
 
-            def on_structure(done: int, total: int) -> None:
+            def on_structure(done: int, total: int, step: str = "") -> None:
                 if not using_model:
                     return
-                label = f"{who[0].upper()}{who[1:]}: part {min(done + 1, total)} of {total}" if done < total else "Structuring the notes"
+                step = step or f"part {min(done + 1, total)} of {total}"  # "writing part 2 of 3", "checking part 2 of 3"
+                label = f"{who[0].upper()}{who[1:]}: {step}" if done < total else "Structuring the notes"
                 _update(job_id, progress=0.72 + 0.26 * done / total, detail=label)
 
             report: dict = {}

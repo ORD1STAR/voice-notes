@@ -1,4 +1,4 @@
-"""Diagrams derived from finished notes: a mind map, a process flow and a chart of key figures.
+"""Diagrams derived from finished notes: a mind map, a process flow, a chart of key figures and a timeline of dates.
 
 Everything is computed from the notes text itself, so nothing is invented and old notes
 get diagrams too. Each diagram is returned as a small drawing (rectangles, text lines,
@@ -12,6 +12,7 @@ Item types: rect, text (one line, baseline at y), line (polyline), arrow (filled
 import re
 from pathlib import Path
 
+from . import languages
 from .structure import is_context_dependent, short_phrase
 
 WIDE = 640
@@ -296,7 +297,7 @@ def flow_data(notes: dict) -> dict | None:
     # No single section reads as a sequence: look across the whole note.
     cued = [b for s in notes.get("sections") or [] for b in s["bullets"] if _CUE.match(b.strip())]
     if len(cued) >= 3:
-        return {"title": "Order of events", "steps": [_step_label(b) for b in cued[:MAX_STEPS]]}
+        return {"title": "Order of events", "generic": True, "steps": [_step_label(b) for b in cued[:MAX_STEPS]]}
     return None
 
 
@@ -427,16 +428,17 @@ def _figure_labels(bullet: str, figures: list) -> list[str]:
     return labels
 
 
-def _fmt_value(key: str, value: float) -> str:
+def _fmt_value(key: str, value: float, lang: str = "en") -> str:
     num = f"{value:,.0f}" if abs(value - round(value)) < 1e-9 else f"{value:,.2f}".rstrip("0").rstrip(".")
     if key == "%":
         return f"{num}%"
     if key in _PREFIX:
         return f"{_PREFIX[key]}{num}"
-    return f"{num} {key}"
+    unit = languages.text("u_" + key, lang) if ("u_" + key) in languages._EN else key
+    return f"{num} {unit}"
 
 
-def chart_data(notes: dict) -> dict | None:
+def chart_data(notes: dict, lang: str = "en") -> dict | None:
     groups: dict[str, list[tuple[str, float]]] = {}
     for sec in notes.get("sections") or []:
         for b in sec["bullets"]:
@@ -462,7 +464,7 @@ def chart_data(notes: dict) -> dict | None:
     items = groups[best][:MAX_BARS]
     return {
         "unit": best,
-        "items": [{"label": label, "value": value, "text": _fmt_value(best, value)} for label, value in items],
+        "items": [{"label": label, "value": value, "text": _fmt_value(best, value, lang)} for label, value in items],
     }
 
 
@@ -495,42 +497,310 @@ def _chart(data: dict, width: int) -> dict:
     return c.done()
 
 
+# ------------------------------------------------------------- timeline
+
+MAX_TIMELINE = 8
+MIN_TIMELINE = 3
+
+
+def _month_table() -> dict[str, int]:
+    names = (
+        "january february march april may june july august september october november december",
+        "janvier février mars avril mai juin juillet août septembre octobre novembre décembre",
+        "enero febrero marzo abril mayo junio julio agosto septiembre octubre noviembre diciembre",
+        "januar februar märz april mai juni juli august september oktober november dezember",
+        "gennaio febbraio marzo aprile maggio giugno luglio agosto settembre ottobre novembre dicembre",
+        "janeiro fevereiro março abril maio junho julho agosto setembro outubro novembro dezembro",
+    )
+    table: dict[str, int] = {}
+    for line in names:
+        for i, word in enumerate(line.split(), 1):
+            table[word] = i
+    table.update({"fevrier": 2, "aout": 8, "decembre": 12, "maerz": 3, "marco": 3, "setiembre": 9})
+    return table
+
+
+_MONTHS = _month_table()
+_MONTH_RE = "|".join(sorted((re.escape(m) for m in _MONTHS), key=len, reverse=True))
+# English words that are also ordinary words: only taken as a month when written with a capital letter.
+_AMBIGUOUS_MONTHS = {"may", "march", "august"}
+
+_DAY_MONTH = re.compile(
+    rf"(?<![\d/.:-])(\d{{1,2}})(?:st|nd|rd|th|er|\.|º)?\s+(?:of\s+|de\s+|d['’]\s*)?({_MONTH_RE})\b"
+    rf"(?:,?\s+(?:de\s+)?(\d{{4}}))?", re.IGNORECASE)
+_MONTH_DAY = re.compile(
+    rf"\b({_MONTH_RE})\s+(\d{{1,2}})(?:st|nd|rd|th)?(?![\d:])(?:,?\s+(\d{{4}}))?", re.IGNORECASE)
+_MONTH_YEAR = re.compile(rf"\b({_MONTH_RE})\s+(\d{{4}})\b", re.IGNORECASE)
+_MONTH_ALONE = re.compile(
+    r"\b(?:in|by|before|until|till|during|since|from|end of|early|late|mid|en|avant|d['’]ici|fin|début|debut|"
+    r"hasta|antes de|a finales de|bis|im|entro|fino a|até)\s+(?:(?:de|d['’]|du)\s*)?"
+    rf"({_MONTH_RE})\b", re.IGNORECASE)
+_ISO_DATE = re.compile(r"(?<![\d-])(\d{4})-(\d{2})-(\d{2})(?![\d-])")
+_SLASH_DATE = re.compile(r"(?<![\d/.])(\d{1,2})([/.])(\d{1,2})\2(\d{4}|(?<=/)\d{2})(?!\d)")
+
+_WEEKDAYS = (
+    "monday tuesday wednesday thursday friday saturday sunday "
+    "lundi mardi mercredi jeudi vendredi samedi dimanche "
+    "lunes martes miércoles miercoles jueves viernes sábado sabado domingo "
+    "montag dienstag mittwoch donnerstag freitag samstag sonntag "
+    "lunedì martedì mercoledì giovedì venerdì sabato domenica"
+)
+_WEEKDAY = re.compile(r"\b(" + "|".join(sorted(_WEEKDAYS.split(), key=len, reverse=True)) + r")\b", re.IGNORECASE)
+_FRENCH_WEEKDAYS = set("lundi mardi mercredi jeudi vendredi samedi dimanche".split())
+_RECURRING = re.compile(r"(?:every|each|chaque|tous les|toutes les|cada|todos los|los|las|jeden|ogni|tutti i|alle)\s+$",
+                        re.IGNORECASE)
+_FRENCH_DEADLINE = re.compile(r"(?:avant|pour|d['’]ici|jusqu['’][aà]u?|ce|dès|vers)\s+(?:le\s+)?$",
+                              re.IGNORECASE)
+
+_NUMWORD = (r"(?:\d+|an?|one|two|three|four|five|six|seven|eight|ten|twelve|un|une|deux|trois|quatre|cinq|sept|huit|dix|"
+            r"douze|uno|dos|tres|cuatro|cinco|seis|diez|doce|um|dois|einer|zwei|drei|vier|due)")
+_RELATIVE = re.compile("|".join([
+    r"\btomorrow\b",
+    r"\bnext\s+(?:week|month|quarter|year)\b",
+    r"\b(?:the\s+)?end\s+of\s+(?:the\s+|this\s+|next\s+)?(?:week|month|quarter|year)\b",
+    rf"\bin\s+{_NUMWORD}\s+(?:days?|weeks?|months?|tagen|wochen|monaten)\b",
+    r"\bdemain\b",
+    r"\bapr[eè]s-demain\b",
+    r"\b(?:la\s+)?semaine\s+prochaine\b",
+    r"\b(?:le\s+)?mois\s+prochain\b",
+    r"\b(?:le\s+)?trimestre\s+prochain\b",
+    r"\bfin\s+(?:de\s+la\s+|du\s+|de\s+l['’])?(?:semaine|mois|trimestre|ann[eé]e)\b",
+    rf"\bdans\s+{_NUMWORD}\s+(?:jours?|semaines?|mois|ans?)\b",
+    r"(?<!la )(?<!esta )\bmañana\b",
+    r"\bla\s+pr[oó]xima\s+semana\b",
+    r"\bel\s+pr[oó]ximo\s+(?:mes|año)\b",
+    r"\b(?:el\s+mes|la\s+semana)\s+que\s+viene\b",
+    r"\b(?:a\s+)?(?:finales\s+de|fines\s+de|fin\s+de)\s+(?:mes|trimestre|año)\b",
+    rf"\bdentro\s+de\s+{_NUMWORD}\s+(?:d[ií]as?|semanas?|meses|años?)\b",
+    r"\bnächste[nr]?\s+(?:woche|monat|jahr)\b",
+    r"\bende\s+(?:des\s+|der\s+|dieses\s+)?(?:woche|monats|monat|quartals|jahres)\b",
+    r"\bdomani\b",
+    r"\b(?:la\s+)?settimana\s+prossima\b",
+    r"\b(?:il\s+)?mese\s+prossimo\b",
+    r"\bfine\s+(?:del\s+)?(?:mese|settimana|anno|trimestre)\b",
+    rf"\btra\s+{_NUMWORD}\s+(?:giorni|settimane|mesi)\b",
+    r"\bamanhã\b",
+    r"\b(?:na\s+)?pr[oó]xima\s+semana\b",
+    r"\bpr[oó]ximo\s+m[eê]s\b",
+    r"\bfim\s+do\s+m[eê]s\b",
+    rf"\bdaqui\s+a\s+{_NUMWORD}\s+(?:dias|semanas|meses)\b",
+    r"\bQ[1-4](?:\s+\d{4})?\b",
+]), re.IGNORECASE)
+
+# Little words that introduce a date ("by Friday", "avant le 15 mars"): they leave with the date.
+_LEAD_WORDS = re.compile(
+    r"(?:\b(?:by|on|before|until|till|for|from|due|at|no later than|the|avant|pour|d['’]ici|jusqu['’][aà]u?|"
+    r"dès|le|el|la|para|hasta|antes de|antes del|am|bis|entro|fino a|em|no|na)\s+)+$", re.IGNORECASE)
+
+
+_TRAILING_VERB = re.compile(r"\s+(?:is|are|was|were|will be|due|est|sont|sera|es|son|ser\u00e1|ist|sind|\u00e8|\u00e9|s\u00e3o)$",
+                            re.IGNORECASE)
+
+
+def _month_ok(word: str) -> bool:
+    return not (word.lower() in _AMBIGUOUS_MONTHS and word[:1].islower())
+
+
+def _nice(label: str) -> str:
+    label = " ".join(label.split())
+    return label[:1].upper() + label[1:]
+
+
+def _find_when(text: str):
+    """The first date or deadline in a sentence: (label, start, end, sort key or None), or None."""
+    exact = []
+    for m in _DAY_MONTH.finditer(text):
+        day = int(m.group(1))
+        if _month_ok(m.group(2)) and 1 <= day <= 31:
+            exact.append((m.start(), m.end(), _nice(m.group(0)),
+                          (int(m.group(3) or 0), _MONTHS[m.group(2).lower()], day)))
+    for m in _MONTH_DAY.finditer(text):
+        day = int(m.group(2))
+        if _month_ok(m.group(1)) and 1 <= day <= 31:
+            exact.append((m.start(), m.end(), _nice(m.group(0)),
+                          (int(m.group(3) or 0), _MONTHS[m.group(1).lower()], day)))
+    for m in _MONTH_YEAR.finditer(text):
+        if _month_ok(m.group(1)):
+            exact.append((m.start(), m.end(), _nice(m.group(0)), (int(m.group(2)), _MONTHS[m.group(1).lower()], 0)))
+    for m in _ISO_DATE.finditer(text):
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            exact.append((m.start(), m.end(), m.group(0), (y, mo, d)))
+    for m in _SLASH_DATE.finditer(text):
+        a, b, y = int(m.group(1)), int(m.group(3)), int(m.group(4))
+        y = y + 2000 if y < 100 else y
+        if not (1 <= a <= 31 and 1 <= b <= 31):
+            continue
+        key = (y, b, a) if a > 12 >= b else (y, a, b) if b > 12 >= a else None  # 03/04/2026 is ambiguous: no order
+        exact.append((m.start(), m.end(), m.group(0), key))
+    # A date without a day only counts when nothing more exact was found.
+    loose = []
+    for m in _MONTH_ALONE.finditer(text):
+        if _month_ok(m.group(1)):
+            loose.append((m.start(), m.end(), _nice(m.group(1)), (0, _MONTHS[m.group(1).lower()], 0)))
+    for m in _WEEKDAY.finditer(text):
+        word = m.group(1).lower()
+        before = text[max(0, m.start() - 20):m.start()]
+        if _RECURRING.search(before):
+            continue
+        if word in _FRENCH_WEEKDAYS and not (_FRENCH_DEADLINE.search(before)
+                                              or re.match(r"\s+prochain\b", text[m.end():], re.IGNORECASE)):
+            continue  # "le lundi" means every Monday in French
+        loose.append((m.start(), m.end(), _nice(m.group(1)), None))
+    for m in _RELATIVE.finditer(text):
+        loose.append((m.start(), m.end(), _nice(re.sub(r"^(?:the)\s+", "", m.group(0), flags=re.IGNORECASE)), None))
+    pool = exact or loose
+    pool = [c for c in pool if not re.match(r"['’]s\b", text[c[1]:])]  # "next week's review" is not a date
+    if not pool:
+        return None
+    return min(pool, key=lambda c: (c[0], -(c[1] - c[0])))
+
+
+def _without_when(text: str, start: int, end: int) -> str:
+    """The sentence with the date and the little word before it taken out."""
+    head = text[:start]
+    lead = _LEAD_WORDS.search(head)
+    if lead:
+        head = head[:lead.start()]
+    rest = f"{head.rstrip()} {text[end:].lstrip()}".strip()
+    rest = re.sub(r"\s+([,.;:])", r"\1", rest)
+    rest = rest.strip(" ,;:.-")
+    while True:  # "Legal review is due before 2 April" would otherwise end on "is"
+        trimmed = _TRAILING_VERB.sub("", rest)
+        if trimmed == rest:
+            break
+        rest = trimmed
+    return rest[:1].upper() + rest[1:]
+
+
+def timeline_data(notes: dict) -> dict | None:
+    """Dated items (dates, weekdays, deadlines) found in the notes, or None when there are fewer than three."""
+    sources = [b for s in notes.get("sections") or [] for b in s["bullets"]] + list(notes.get("actions") or [])
+    items, seen = [], set()
+    for text in sources:
+        found = _find_when(text)
+        if not found:
+            continue
+        start, end, label, key = found
+        what = short_phrase(_without_when(text, start, end), 11)
+        if len(re.findall(r"\w", what)) < 3 or what.lower() in seen:
+            continue
+        seen.add(what.lower())
+        items.append({"when": label, "what": what, "key": key})
+        if len(items) == MAX_TIMELINE:
+            break
+    if len(items) < MIN_TIMELINE:
+        return None
+    by_date = all(i["key"] for i in items)
+    if by_date:
+        items.sort(key=lambda i: i["key"])
+    return {"items": [{"when": i["when"], "what": i["what"]} for i in items], "by_date": by_date}
+
+
+def _timeline_wide(data: dict) -> dict:
+    c = Canvas(WIDE)
+    pill_x, pill_w, spine, box_x = 2, 134, 152, 178
+    box_w = WIDE - box_x - 2
+    rows, y = [], 2.0
+    for it in data["items"]:
+        wl = wrap(it["when"], BRANCH_SIZE, pill_w - 20, 2, True)
+        tl = wrap(it["what"], LEAF_SIZE, box_w - 20, 3)
+        ph, bh = len(wl) * 17 + 16, len(tl) * 16 + 12
+        rh = max(ph, bh)
+        rows.append((y, rh, wl, ph, tl, bh))
+        y += rh + 14
+    if len(rows) > 1:
+        c.line([(spine, rows[0][0] + rows[0][1] / 2), (spine, rows[-1][0] + rows[-1][1] / 2)])
+    for y, rh, wl, ph, tl, bh in rows:
+        cy = y + rh / 2
+        c.line([(pill_x + pill_w, cy), (spine - 5, cy)])
+        c.line([(spine + 5, cy), (box_x, cy)])
+        c.rect(pill_x, cy - ph / 2, pill_w, ph, "branch", 6)
+        c.lines(pill_x + 10, cy - ph / 2 + 8, wl, BRANCH_SIZE, "branch-text", True, 17)
+        c.circle(spine, cy, 5, "badge")
+        c.rect(box_x, cy - bh / 2, box_w, bh, "leaf", 5)
+        c.lines(box_x + 10, cy - bh / 2 + 6, tl, LEAF_SIZE, "leaf-text", False, 16)
+    return c.done()
+
+
+def _timeline_narrow(data: dict) -> dict:
+    c = Canvas(NARROW)
+    spine, x0 = 10, 28
+    w_all = NARROW - x0 - 2
+    rows, y = [], 2.0
+    for it in data["items"]:
+        wl = wrap(it["when"], BRANCH_SIZE, w_all - 20, 1, True)
+        pw = min(w_all, max(text_width(line, BRANCH_SIZE, True) for line in wl) + 20)
+        tl = wrap(it["what"], LEAF_SIZE, w_all - 20, 3)
+        ph, bh = 17 + 16, len(tl) * 16 + 12
+        rows.append((y, wl, pw, ph, tl, bh))
+        y += ph + 6 + bh + 16
+    if len(rows) > 1:
+        c.line([(spine, rows[0][0] + rows[0][3] / 2), (spine, rows[-1][0] + rows[-1][3] / 2)])
+    for y, wl, pw, ph, tl, bh in rows:
+        c.line([(spine + 5, y + ph / 2), (x0, y + ph / 2)])
+        c.rect(x0, y, pw, ph, "branch", 6)
+        c.lines(x0 + 10, y + 8, wl, BRANCH_SIZE, "branch-text", True, 17)
+        c.circle(spine, y + ph / 2, 5, "badge")
+        c.rect(x0, y + ph + 6, w_all, bh, "leaf", 5)
+        c.lines(x0 + 10, y + ph + 6 + 6, tl, LEAF_SIZE, "leaf-text", False, 16)
+    return c.done()
+
+
 # ---------------------------------------------------------------- entry
 
-def build_visuals(notes: dict | None) -> list[dict]:
-    """Return the diagrams that make sense for these notes (possibly none)."""
+def build_visuals(notes: dict | None, language: str | None = "auto") -> list[dict]:
+    """Return the diagrams that make sense for these notes (possibly none).
+
+    Titles and captions are written in the language of the notes: the one chosen for the recording,
+    else a guess from the words (English when unsure).
+    """
     if not notes or not notes.get("sections"):
         return []
+    lang = languages.notes_language(notes, language) or "en"
+
+    def T(key: str, **kw) -> str:
+        return languages.text(key, lang).format(**kw)
+
     out = []
     mm = mindmap_data(notes)
     if mm:
+        branches = ", ".join(b["label"] for b in mm["branches"])
         out.append({
             "kind": "mindmap",
-            "title": "Mind map",
-            "caption": ("The sections of the note and their main points."
-                        if mm["total"] <= MAX_BRANCHES
-                        else f"The first {MAX_BRANCHES} of {mm['total']} sections and their main points."),
-            "alt": "Mind map of " + mm["center"] + " with the branches: " + ", ".join(b["label"] for b in mm["branches"]),
+            "title": T("mm_title"),
+            "caption": (T("mm_caption") if mm["total"] <= MAX_BRANCHES
+                        else T("mm_caption_cut", n=MAX_BRANCHES, total=mm["total"])),
+            "alt": T("mm_alt", center=mm["center"], branches=branches),
             "layouts": {"wide": _mindmap_wide(mm), "narrow": _mindmap_narrow(mm)},
         })
     fl = flow_data(notes)
     if fl:
         out.append({
             "kind": "flow",
-            "title": "Process",
-            "caption": fl["title"] if fl["title"] != "Order of events" else "The steps in the order they were described.",
-            "alt": "Process in " + str(len(fl["steps"])) + " steps: " + "; ".join(fl["steps"]),
+            "title": T("flow_title"),
+            "caption": T("flow_caption") if fl.get("generic") else fl["title"],
+            "alt": T("flow_alt", n=len(fl["steps"]), steps="; ".join(fl["steps"])),
             "layouts": {"wide": _flow_wide(fl), "narrow": _flow_narrow(fl)},
         })
-    ch = chart_data(notes)
+    ch = chart_data(notes, lang)
     if ch:
-        unit_name = {"%": "percentages", "EUR": "amounts in euros", "USD": "amounts in dollars",
-                     "GBP": "amounts in pounds"}.get(ch["unit"], ch["unit"])
+        key = "u_" + ch["unit"]
+        unit_name = languages.text(key, lang) if key in languages._EN else ch["unit"]
         out.append({
             "kind": "chart",
-            "title": "Key figures",
-            "caption": f"Values mentioned in the note, as {unit_name}.",
-            "alt": "Bar chart of " + unit_name + ": " + "; ".join(f"{i['label']} {i['text']}" for i in ch["items"]),
+            "title": T("chart_title"),
+            "caption": T("chart_caption", unit=unit_name),
+            "alt": T("chart_alt", unit=unit_name, items="; ".join(f"{i['label']} {i['text']}" for i in ch["items"])),
             "layouts": {"wide": _chart(ch, WIDE), "narrow": _chart(ch, NARROW)},
+        })
+    tl = timeline_data(notes)
+    if tl:
+        out.append({
+            "kind": "timeline",
+            "title": T("tl_title"),
+            "caption": T("tl_caption_date") if tl["by_date"] else T("tl_caption"),
+            "alt": T("tl_alt", n=len(tl["items"]), items="; ".join(f"{i['when']}: {i['what']}" for i in tl["items"])),
+            "layouts": {"wide": _timeline_wide(tl), "narrow": _timeline_narrow(tl)},
         })
     return out

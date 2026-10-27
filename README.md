@@ -27,6 +27,8 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 - Rename a note, and search all your notes (titles, summaries, bullets, action items, file names and the full transcript) from the list.
 - Live progress through each step, with the time spent on the current step, the place in the queue and a clear statement of how the notes are built. When Ollama is not available the page says so, and why.
 - A note that failed because of a temporary problem (the transcription service did not answer, the server restarted) can be tried again without uploading the file once more. The recording is kept for a week for that purpose, or until the note is deleted.
+- Share link: every finished note has a link (`/n/<id>`, the "Copy link" button next to the export buttons) that opens the note full screen, without the sidebar, the recorder or any editing control. It has the summary, key points, sections, actions, diagrams, the transcript tab and the PDF, Markdown and text exports, follows the light or dark setting and prints cleanly. A note that is still being made shows its progress there and turns into the note by itself. **The link is a secret address: anyone who has it can read the note (and download its exports), and there is no password.** Only put the app behind a network or a login you trust before you send links around. An unknown link shows "This note does not exist". The page is marked `noindex`.
+- Work goes on without the browser: once the upload has finished, the note is prepared on the server, so you can close the tab or switch to another note. The browser only asks for confirmation if you leave while the file is still being sent. A finished note you have not opened yet shows a light blue dot in the sidebar (and a count in the tab title); the dot goes away when you open the note, in the normal or the share view. A note you watched until it was done never gets a dot, and old notes are not marked. The list refreshes by itself while a note is being made, and when you come back to the tab. If the server restarts in the middle of a job, the note is shown as failed with a Try again button.
 - Keyboard friendly, works on phones, follows the system light or dark setting.
 - No build step: the frontend is plain HTML, CSS and JavaScript. The two typefaces (Instrument Sans and Instrument Serif) are bundled, so nothing is loaded from another site.
 
@@ -88,6 +90,30 @@ All three engines produce the same shape: title, summary, key points, sections w
 
 **Local model (when Groq is not used and Ollama is running with the model).** Each piece of about 3500 characters is sent with strict instructions and one worked example in the language of the recording (English or French; no example for other languages), at a low temperature. Nothing the model returns is trusted blindly: bullets, key points and actions whose words or numbers are not in the transcript are dropped, filler and empty remarks are removed, repeated points are merged, a generic title or heading ("Notes", "Details") is replaced by one from the rules, and tasks the model left out are added from the rules. A section that only lists tasks ("Action items", "Next steps") is dropped and its tasks go to the checklist, so they are not shown twice. If nothing usable is left, that piece falls back to the rules. The model is what gives rewritten, shorter bullets; the checks are what keep it honest. A 1.5B model is much weaker than the Groq model: expect plainer notes and now and then a part that falls back to the rules.
 
+### Review pass and final call (Groq)
+
+When notes are written by the Groq chat model, every part of the transcript is written, checked against the
+transcript with the usual rules, and then reviewed in a second call. The reviewer sees the transcript and the draft
+and restores dropped facts, names, figures and deadlines, fixes attributions, splits bullets that carry two ideas,
+removes filler and makes the headings specific. The reviewed notes go through the same checks as the draft (a number
+or name that is not in the recording is removed) and are used only when they are not clearly worse. If the review
+fails for any reason (rate limit, timeout, bad answer), the draft is kept and the note still completes.
+
+A long recording is cut into several parts. After merging them, one more call writes the title, a 3 to 5 sentence
+summary and 2 to 5 key points from the part summaries, the merged section headings and the candidate key points.
+
+Settings (environment variables):
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `GROQ_REVIEW` | `1` | `0`, `false`, `no` or `off` turns the review pass off (one call per part). |
+| `GROQ_CHAT_MAX_TOKENS` | `4096` | Longest answer asked from the chat model, kept between 512 and 8192. |
+
+The review doubles the number of chat calls. On the free Groq tier a rate limit is retried twice (waiting as long as
+Groq asks, at most 20 seconds); a review that would have to wait longer is skipped. Set `GROQ_REVIEW=0` if you are
+often rate limited. The local Ollama model is not affected: it stays single pass.
+
+
 ## Configuration
 
 Everything is set through environment variables.
@@ -146,8 +172,11 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `PUT` | `/api/notes/{id}/notes` | Replace the text of a finished note: `{"title", "summary", "key_points", "actions", "sections": [{"heading", "bullets"}]}`. Empty lines and empty sections are dropped; a title and at least one point are required (400 otherwise). The note then has `edited: true`. |
 | `POST` | `/api/notes/{id}/retry` | Run a failed note again (202), or 409 when it cannot be retried. |
 | `POST` | `/api/notes/{id}/restructure` | Write the notes of a finished note again from its transcript (202), or 409 when it is not finished or has no transcript. The earlier notes stay until the new ones are ready, and stay if the rebuild fails (`rebuild_error` says why). |
+| `POST` | `/api/notes/{id}/seen` | Mark a finished note as opened (204, 404 for an unknown note; safe to repeat). The list rows (`GET /api/notes`) carry `unseen: true` for finished notes that were never opened. |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. A PDF of a note written mostly in a script the PDF fonts cannot draw (Arabic, Hebrew, Chinese, Japanese, Korean, Thai, Indic) is refused with status 422 and a message; Markdown and text always work. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
+
+The page itself is also served at `/n/<id>` (the share link) for any id; the script shows the note, or a friendly message when there is no such note. These responses carry `X-Robots-Tag: noindex, nofollow`.
 
 ## Tests
 

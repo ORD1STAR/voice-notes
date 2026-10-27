@@ -143,3 +143,14 @@ def test_split_cuts_in_the_quiet_gap(tmp_path, monkeypatch):
     chunks, overlaps = audio.split_audio_ex(src, tmp_path / "out")
     assert overlaps[1] == 0.0
     assert audio.probe_duration(chunks[0]) == pytest.approx(9.0, abs=0.3)
+
+
+def test_plan_cuts_does_not_send_a_chunk_with_almost_nothing_new():
+    # 600.5 s with a 600 s target: the last half second is folded into the chunk before it
+    plan = audio.plan_cuts(600.5, 600, [])
+    assert len(plan) == 1 and plan[0] == pytest.approx((0.0, 600.5, 0.0))
+    plan = audio.plan_cuts(1200.4, 600, [])
+    assert plan[-1][0] + plan[-1][1] == pytest.approx(1200.4)
+    assert all(length - lead >= audio.MIN_TAIL_SECONDS for _, length, lead in plan)
+    # a tail with real speech in it still gets its own chunk
+    assert len(audio.plan_cuts(25.0, 10, [])) == 3

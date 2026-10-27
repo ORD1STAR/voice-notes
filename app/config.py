@@ -76,6 +76,16 @@ class Settings:
         return _int("GROQ_CHAT_TIMEOUT", 90)
 
     @property
+    def groq_chat_max_tokens(self) -> int:
+        """Longest answer asked from the chat model, kept between 512 and 8192."""
+        return min(max(_int("GROQ_CHAT_MAX_TOKENS", 4096), 512), 8192)
+
+    @property
+    def groq_review(self) -> bool:
+        """After the first draft of each part, ask the chat model to check the draft against the transcript."""
+        return os.environ.get("GROQ_REVIEW", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    @property
     def data_dir(self) -> Path:
         return Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 

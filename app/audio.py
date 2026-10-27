@@ -9,6 +9,7 @@ from .config import AUDIO_BITRATE, AUDIO_RATE, settings
 # When a chunk has to start in the middle of speech, it starts this many seconds early.
 # The repeated words are removed again when the transcripts are joined.
 OVERLAP_SECONDS = 2.0
+MIN_TAIL_SECONDS = 1.0
 
 
 class AudioError(Exception):
@@ -169,6 +170,11 @@ def plan_cuts(
         plan.append((max(start - lead, 0.0), cut - start + lead, lead))
         start = cut
         lead = overlap if hard else 0.0
+    # A last chunk with less than a second of new audio is not worth a request (Whisper makes up words for it):
+    # the chunk before it simply runs to the end.
+    if len(plan) > 1 and plan[-1][1] - plan[-1][2] < MIN_TAIL_SECONDS:
+        s0, _, l0 = plan[-2]
+        plan = plan[:-2] + [(s0, duration - s0, l0)]
     return plan
 
 

@@ -265,3 +265,78 @@ def test_recording_denied_shows_a_clear_message(chromium, rich_stack):
     assert "blocked" in msg and "choose a file" in msg
     assert page.locator("#drop-idle").is_visible()
     ctx.close()
+
+
+# ------------------------------------------------------------------ timeline
+
+TIMELINE_NOTES = {
+    "title": "Spring release schedule",
+    "summary": "The team agrees the dates for the spring release and who sends what.",
+    "sections": [
+        {"heading": "Content", "bullets": [
+            "Design finishes the landing page by Friday.",
+            "Marketing sends the newsletter on March 15th.",
+            "Legal review is due before 2 April 2027, which leaves very little room for changes."]},
+        {"heading": "Release", "bullets": [
+            "The release candidate is built next week.",
+            "Support trains on the new screens by the end of the month."]},
+        {"heading": "Team rhythm", "bullets": ["Meet every Monday morning.", "Keep the meeting short."]},
+    ],
+    "key_points": ["The landing page is due on Friday."],
+    "actions": ["Book the review meeting"],
+}
+
+
+@pytest.fixture(scope="module")
+def timeline_stack(tmp_path_factory):
+    data = tmp_path_factory.mktemp("timeline-data")
+    fake = fakes.start_fake(delay=0.2, notes=TIMELINE_NOTES)
+    port = free_port()
+    env = dict(
+        os.environ,
+        GROQ_API_KEY="test-key-not-real",
+        GROQ_API_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/audio/transcriptions",
+        OLLAMA_HOST_URL=f"http://127.0.0.1:{fake.server_port}",
+        OLLAMA_MODEL="qwen2.5:1.5b",
+        USE_OLLAMA="1",
+        USE_GROQ_CHAT="0",
+        GROQ_CHAT_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/chat/completions",
+        GROQ_MODELS_URL=f"http://127.0.0.1:{fake.server_port}/openai/v1/models",
+        CHUNK_SECONDS="10",
+        DATA_DIR=str(data),
+        FFMPEG_BIN=FFMPEG,
+        PORT=str(port),
+        HOST="127.0.0.1",
+    )
+    proc = subprocess.Popen([sys.executable, "-m", "app"], cwd=ROOT, env=env,
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    base = f"http://127.0.0.1:{port}"
+    for _ in range(100):
+        try:
+            if httpx.get(base + "/api/health", timeout=1).status_code == 200:
+                break
+        except httpx.HTTPError:
+            time.sleep(0.1)
+    else:
+        proc.kill()
+        pytest.fail("server did not start")
+    yield base
+    proc.terminate()
+    proc.wait(timeout=10)
+    fake.shutdown()
+
+
+@pytest.mark.parametrize("name,viewport,mobile", [("desktop", {"width": 1280, "height": 900}, False),
+                                                  ("phone", {"width": 390, "height": 800}, True)])
+def test_timeline_is_drawn_and_fits(chromium, timeline_stack, sample, name, viewport, mobile):
+    ctx, page, problems = open_note(chromium, timeline_stack, sample, viewport, mobile=mobile)
+    kinds = page.eval_on_selector_all(".figure", "els => els.map(e => e.dataset.kind)")
+    assert "timeline" in kinds, kinds
+    assert page.evaluate(FIT_JS) == []
+    assert page.evaluate(SVG_CONTRAST_JS) == []
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    title = page.locator('.figure[data-kind="timeline"] .figure-title').inner_text()
+    assert title == "Dates and deadlines"
+    assert problems == [], problems
+    shot(page, f"timeline-{name}.png")
+    ctx.close()

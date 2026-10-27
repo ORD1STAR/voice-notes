@@ -72,7 +72,7 @@ def _public(job: dict) -> dict:
     out["stage_elapsed"] = max(0, round(time.time() - job.get("stage_started", time.time())))
     if job.get("status") == "done" and job.get("notes"):
         out["notes"] = structure.ensure_key_points(job["notes"])  # notes saved before key points existed get them here
-        out["visuals"] = visuals.build_visuals(job["notes"])
+        out["visuals"] = visuals.build_visuals(job["notes"], job.get("language"))
         out["transcript_paragraphs"] = structure.paragraphs(job.get("transcript") or "")
     else:
         out["transcript"] = None
@@ -199,6 +199,14 @@ def restructure_note(job_id: str):
     return {"id": job_id}
 
 
+@app.post("/api/notes/{job_id}/seen", status_code=204)
+def seen_note(job_id: str):
+    """The reader opened this note: the sidebar stops flagging it as new."""
+    if not jobs.mark_seen(job_id):
+        raise HTTPException(404, "This note does not exist.")
+    return Response(status_code=204)
+
+
 @app.delete("/api/notes/{job_id}", status_code=204)
 def delete_note(job_id: str):
     if not jobs.delete(job_id):
@@ -239,6 +247,14 @@ async def http_error(_: Request, exc: HTTPException):
 @app.get("/")
 def index():
     return FileResponse(STATIC_DIR / "index.html", headers={"Cache-Control": "no-cache"})
+
+
+@app.get("/n/{note_id}")
+def shared_note(note_id: str):
+    """The share link: the same page, which shows the note full screen. Unknown ids get the page too,
+    and the page says the note does not exist."""
+    return FileResponse(STATIC_DIR / "index.html",
+                        headers={"Cache-Control": "no-cache", "X-Robots-Tag": "noindex, nofollow"})
 
 
 app.mount("/", StaticFiles(directory=STATIC_DIR), name="static")

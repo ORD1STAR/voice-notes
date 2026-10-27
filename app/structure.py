@@ -9,6 +9,7 @@ Notes have this shape:
      "sections": [{"heading": str, "bullets": [str]}], "actions": [str]}
 "key_points" and "actions" are optional.
 """
+import inspect
 import json
 import logging
 import math
@@ -244,6 +245,27 @@ def short_phrase(text: str, max_words: int = 8, split: bool = True) -> str:
     return s[:1].upper() + s[1:] if s else ""
 
 
+def _as_list(value) -> list:
+    """A model sometimes sends one string or one object where a list is expected."""
+    if value is None or value == "":
+        return []
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str):
+        return [line for line in value.splitlines() if line.strip()]
+    return [value]
+
+
+def _item_text(item) -> str:
+    """The text of a list item; a model may wrap it in an object such as {"text": "..."}."""
+    if isinstance(item, dict):
+        for key in ("text", "bullet", "point", "content", "sentence", "task"):
+            if item.get(key):
+                return str(item[key])
+        return ""
+    return "" if item is None else str(item)
+
+
 def normalize_notes(raw: dict) -> dict:
     """Validate and clean a notes dict. Raises StructureError when unusable."""
     if not isinstance(raw, dict):
@@ -251,13 +273,13 @@ def normalize_notes(raw: dict) -> dict:
     title = str(raw.get("title") or "").strip().strip('"')
     summary = str(raw.get("summary") or "").strip()
     sections = []
-    for sec in raw.get("sections") or []:
+    for sec in _as_list(raw.get("sections")):
         if not isinstance(sec, dict):
             continue
-        heading = str(sec.get("heading") or "").strip().strip("#").strip()
+        heading = str(sec.get("heading") or sec.get("title") or "").strip().strip("#").strip()
         bullets = []
-        for b in sec.get("bullets") or []:
-            b = re.sub(r"^[\-\*•]\s*", "", str(b).strip())
+        for b in _as_list(sec.get("bullets")):
+            b = re.sub(r"^[\-\*•]\s*", "", _item_text(b).strip())
             if b:
                 bullets.append(b)
         if bullets:
@@ -272,8 +294,8 @@ def normalize_notes(raw: dict) -> dict:
 
 def _clean_list(items, clip: int, cap: int, bullet_marks: bool = False) -> list[str]:
     out: list[str] = []
-    for a in items or []:
-        a = str(a).strip()
+    for a in _as_list(items):
+        a = _item_text(a).strip()
         a = re.sub(r"^(?:(?:[\-\*•]|\[[ xX]?\])\s*)+", "", a) if bullet_marks else re.sub(r"^[\-\*•]\s*", "", a)
         if a and a.lower() not in {x.lower() for x in out}:
             out.append(_clip(a, clip))
@@ -986,12 +1008,39 @@ SUMMARY_PROMPT = (
 )
 
 GENERIC_TITLES = {"notes", "note", "voice note", "summary", "untitled", "untitled note", "meeting notes", "transcript",
-                  "title", "recording", "voice recording", "notes from the recording"}
+                  "title", "recording", "voice recording", "notes from the recording",
+                  "note vocale", "notes vocales", "r\u00e9sum\u00e9", "sans titre", "titre", "nota de voz", "notas",
+                  "resumen", "sin t\u00edtulo", "sprachnotiz", "notizen", "zusammenfassung", "\u0645\u0644\u0627\u062d\u0638\u0627\u062a",
+                  "\u0645\u0644\u062e\u0635", "\u7b14\u8bb0", "\u603b\u7ed3"}
 ACTION_HEADINGS = {"action items", "action item", "actions", "next steps", "to do", "to-do", "todo", "tasks", "to dos",
                    "follow up", "follow-up", "follow ups", "actions to take", "prochaines etapes", "prochaines \u00e9tapes",
                    "actions \u00e0 faire", "t\u00e2ches", "\u00e0 faire", "pr\u00f3ximos pasos", "tareas", "acciones"}
 GENERIC_HEADINGS = {"notes", "note", "details", "introduction", "summary", "overview", "main points", "other",
-                    "miscellaneous", "general", "main topic", "key points", "content", "topic", "conclusion"}
+                    "miscellaneous", "general", "main topic", "key points", "content", "topic", "conclusion",
+                    "others", "various", "misc", "the rest", "remarks", "comments", "points",
+                    "divers", "autres", "autre", "g\u00e9n\u00e9ral", "g\u00e9n\u00e9ralit\u00e9s", "r\u00e9sum\u00e9", "d\u00e9tails",
+                    "points principaux", "aper\u00e7u", "contenu", "sujet", "remarques",
+                    "otros", "otro", "resumen", "detalles", "introducci\u00f3n", "contenido", "tema", "conclusi\u00f3n",
+                    "notizen", "allgemein", "zusammenfassung", "\u00fcbersicht", "sonstiges", "einleitung", "inhalt", "fazit",
+                    "dettagli", "riepilogo", "generale", "altro", "introduzione", "contenuto", "conclusione",
+                    "detalhes", "resumo", "geral", "outros", "introdu\u00e7\u00e3o", "conte\u00fado", "conclus\u00e3o",
+                    "genel", "di\u011fer", "\u00f6zet", "detaylar", "giri\u015f", "sonu\u00e7",
+                    "\u0645\u0644\u0627\u062d\u0638\u0627\u062a", "\u062a\u0641\u0627\u0635\u064a\u0644", "\u0645\u0642\u062f\u0645\u0629", "\u0645\u0644\u062e\u0635", "\u0639\u0627\u0645",
+                    "\u0623\u062e\u0631\u0649", "\u062e\u0644\u0627\u0635\u0629", "\u0645\u062d\u062a\u0648\u0649",
+                    "\u7b14\u8bb0", "\u7ec6\u8282", "\u6982\u8ff0", "\u5176\u4ed6", "\u603b\u7ed3", "\u4ecb\u7ecd", "\u5185\u5bb9"}
+# "Part 2", "Section 3", "Topic 1": a number is no topic
+_NUMBERED_HEADING = re.compile(r"^(?:part|section|topic|point|item|partie|secci\u00f3n|seccion|teil|parte|b\u00f6l\u00fcm)\s*\d+$")
+
+
+def _generic_heading(heading: str) -> bool:
+    h = re.sub(r"\s+", " ", heading.lower()).strip(" .:;-")
+    return not h or h in GENERIC_HEADINGS or bool(_NUMBERED_HEADING.match(h))
+
+
+def _is_fragment(text: str) -> bool:
+    """One short word is no statement. Texts with figures and languages written without spaces are exempt."""
+    return (len(text.split()) < 2 and len(text) < 25 and not re.search(r"\d", text)
+            and not _CJK_RUN.search(text) and not re.search(r"[\u0600-\u06ff]", text))
 
 
 def ollama_status() -> dict:
@@ -1017,7 +1066,8 @@ def engine_plan() -> dict:
     local = _ollama_plan()
     if groq_enabled():
         model = groq_status()["model"]
-        return {"engine": f"groq:{model}", "model": model, "reason": "", "backup": local}
+        return {"engine": f"groq:{model}", "model": model, "reason": "", "backup": local,
+                "review": settings.groq_review}
     return local
 
 
@@ -1251,14 +1301,15 @@ def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language
         bullets = []
         for b in sec["bullets"]:
             c = _tidy(b) if relaxed else clean_sentence(b)
-            if not c or is_empty_remark(c) or not supported(c) or any(_near_duplicate(c, x) for x in seen):
+            if (not c or is_empty_remark(c) or (relaxed and _is_fragment(c)) or not supported(c)
+                    or any(_near_duplicate(c, x) for x in seen)):
                 continue
             seen.append(c)
             bullets.append(c)
         if not bullets:
             continue
         heading = sec["heading"].strip().rstrip(".:;").strip()
-        if not heading or heading.lower() in GENERIC_HEADINGS or len(heading.split()) > 7 or not label_ok(heading):
+        if _generic_heading(heading) or len(heading.split()) > 7 or not label_ok(heading):
             heading = best_phrase(bullets) or short_phrase(heading, 5) or "Notes"
         sections.append({"heading": heading, "bullets": bullets})
     # A section that only lists tasks ("Action items", "Next steps") repeats the checklist: its tasks move there.
@@ -1302,13 +1353,45 @@ def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language
                             "actions": actions})
 
 
+def _notifier(on_progress):
+    """Wrap a progress callback. A callback that takes a third argument also gets a short text for the step."""
+    if on_progress is None:
+        return lambda done, total, step="": None
+    try:
+        kinds = [p.kind for p in inspect.signature(on_progress).parameters.values()]
+    except (TypeError, ValueError):
+        kinds = []
+    positional = sum(1 for k in kinds if k in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD))
+    wide = inspect.Parameter.VAR_POSITIONAL in kinds or positional >= 3
+
+    def notify(done: int, total: int, step: str = "") -> None:
+        if wide:
+            on_progress(done, total, step)
+        else:
+            on_progress(done, total)
+
+    return notify
+
+
+def _digest_summary(results: list[dict]) -> str:
+    """A summary of the whole note made of the first sentence of each part summary (used when no model gives one)."""
+    firsts = []
+    for r in results:
+        sentences = split_sentences(r.get("summary") or "")
+        if sentences:
+            firsts.append(sentences[0])
+    return " ".join(firsts[:5])
+
+
 def _structure_pieces(
     text: str,
     limit: int,
     chat: Callable[[str], dict],
-    head: Callable[[str], dict],
+    head: Callable[[str], dict] | None,
     refine: Callable[[dict, str], dict],
-    on_progress: Callable[[int, int], None] | None = None,
+    on_progress: Callable[..., None] | None = None,
+    review: Callable[[dict, str], dict] | None = None,
+    final: Callable[[str, list[str], list[str]], dict] | None = None,
 ) -> tuple[dict, int]:
     """Structure a transcript piece by piece with a model. Returns (notes, number of pieces done by the rules).
 
@@ -1316,17 +1399,31 @@ def _structure_pieces(
     worked. After two failures in a row the model is assumed to be unavailable and the remaining pieces use
     the rules. `chat(piece)` returns the raw notes of one piece, `head(digest)` the title and summary of the
     whole note, `refine(notes, piece)` checks and repairs one piece.
+
+    With `review`, each piece that the model wrote is checked once more: `review(notes, piece)` returns the
+    notes to keep (the draft itself when the review is not better). A review that raises StructureError keeps
+    the draft; it does not count as a failure of the model, but two reviews in a row that fail stop the reviews
+    for the rest of the note. With `final(digest, headings, key_points)` the title, the summary and the key
+    points of a note with several pieces come from one call that sees the merged headings and the candidates.
+
+    The progress callback gets (done, total) and, when it takes a third argument, a text such as "writing part
+    2 of 3". With a review every piece is two steps.
     """
     pieces = split_pieces(text, limit)
     if not pieces:
         raise StructureError("The transcript is empty.")
+    n = len(pieces)
+    notify = _notifier(on_progress)
+    steps = 2 * n if review else n
+    total = steps + (1 if review and n > 1 else 0)
     results: list[dict] = []
     fallback_pieces = 0
     streak = 0
+    review_misses = 0
     last_error = ""
     for i, piece in enumerate(pieces):
-        if on_progress:
-            on_progress(i, len(pieces))
+        done = 2 * i if review else i
+        notify(done, total, f"writing part {i + 1} of {n}" if review else f"part {i + 1} of {n}")
         notes = None
         if streak < 2:
             try:
@@ -1335,6 +1432,14 @@ def _structure_pieces(
             except StructureError as exc:
                 streak += 1
                 last_error = str(exc)
+        if notes is not None and review and review_misses < 2:
+            notify(done + 1, total, f"checking part {i + 1} of {n}")
+            try:
+                notes = review(notes, piece) or notes
+                review_misses = 0
+            except (StructureError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                review_misses += 1
+                log.info("review of part %d skipped, the draft is kept (%s)", i + 1, exc)
         if notes is None:
             try:
                 notes = structure_rules(piece)
@@ -1342,9 +1447,8 @@ def _structure_pieces(
                 continue
             fallback_pieces += 1
         results.append(notes)
-    if on_progress:
-        on_progress(len(pieces), len(pieces))
-    if not results or fallback_pieces == len(pieces):
+    notify(steps, total, "combining the parts" if total > steps else "")
+    if not results or fallback_pieces == n:
         raise StructureError(last_error or "the model produced no usable notes")
     if len(results) == 1:
         return results[0], fallback_pieces
@@ -1353,25 +1457,38 @@ def _structure_pieces(
         for sec in r["sections"]:
             if sections and sections[-1]["heading"].lower() == sec["heading"].lower():
                 sections[-1] = {"heading": sections[-1]["heading"],
-                                "bullets": (sections[-1]["bullets"] + sec["bullets"])[:12]}
+                                "bullets": (sections[-1]["bullets"] + sec["bullets"])[:20]}
             else:
                 sections.append(sec)
     actions = _clean_list([a for r in results for a in r.get("actions", [])], 160, 10, bullet_marks=True)
-    key_points = [k for r in results for k in r.get("key_points", [])]
+    candidates: list[str] = []
+    for r in results:
+        for k in r.get("key_points", []):
+            if not any(_near_duplicate(k, c) for c in candidates):
+                candidates.append(k)
+    key_points = candidates
     if len(key_points) > 5:
         imp = _importance(key_points)
         key_points = [key_points[i] for i in sorted(sorted(range(len(key_points)), key=lambda k: -imp[k])[:5])]
     digest = "\n".join(f"Part {i + 1}: {r['summary']}" for i, r in enumerate(results))
+    title, summary = "", ""
     try:
-        top = head(digest)
+        top = final(digest, [sec["heading"] for sec in sections], candidates) if final else head(digest)
+        if not isinstance(top, dict):
+            top = {}
         title = _clean_title(top.get("title"))
         summary = str(top.get("summary") or "").strip()
+        chosen = [str(k).strip() for k in _as_list(top.get("key_points")) if str(k).strip()] if final else []
+        if len(chosen) >= 2 or (chosen and len(candidates) < 2):  # a single survivor of many candidates: keep the rules' pick
+            key_points = chosen[:5]
     except StructureError:
         title, summary = "", ""
-    if not title or title.lower() in GENERIC_TITLES or not summary:
-        fallback = structure_rules(text)
-        title = title if title and title.lower() not in GENERIC_TITLES else fallback["title"]
-        summary = summary or fallback["summary"]
+    if not title or title.lower() in GENERIC_TITLES:
+        title = structure_rules(text)["title"]
+    if not summary:
+        summary = _digest_summary(results) or structure_rules(text)["summary"]
+    if total > steps:
+        notify(total, total)
     return {"title": _clip(title, 100), "summary": summary, "key_points": key_points,
             "sections": sections[:30], "actions": actions}, fallback_pieces
 
@@ -1457,7 +1574,7 @@ def groq_status() -> dict:
         return {"enabled": False, "model": model, "reason": "disabled"}
     if not settings.groq_api_key:
         return {"enabled": False, "model": model, "reason": "no key"}
-    return {"enabled": True, "model": model, "reason": ""}
+    return {"enabled": True, "model": model, "reason": "", "review": settings.groq_review}
 
 
 GROQ_SYSTEM_PROMPT = (
@@ -1467,53 +1584,151 @@ GROQ_SYSTEM_PROMPT = (
     "- Rewrite the speech into proper written sentences. Remove fillers, stutters, repetitions and false starts. "
     "Never copy the spoken wording word for word.\n"
     "- Never invent facts, names, numbers or dates. Every name, number and date in the notes must come from the "
-    "transcript. Leave out anything that is unclear.\n"
+    "transcript, written as it was said: keep amounts and units, and keep relative dates such as \"next Friday\" "
+    "as they were said. Leave out anything that is unclear.\n"
     "- {language_rule}\n"
-    "- Keep it concise: leave out greetings, small talk, asides and anything without content, and do not repeat a point.\n"
-    "- Use a neutral tone and plain statements. Do not address the speaker and do not describe the recording itself.\n"
+    "- Keep it concise in wording but complete in content: never drop a decision, a figure, a name, a date, a "
+    "deadline or a reason to save space, and do not repeat a point. Leave out greetings, small talk and asides.\n"
+    "- Use a neutral, impersonal tone, like a record written for readers who were not there. No first person "
+    "filler such as \"I think\" or \"I want to say\", no \"the speaker says\", do not address the speaker and do "
+    "not describe the recording itself. When the speaker is unsure, say so with a word like \"probably\" or "
+    "\"possibly\". When several people are named, say who decided, said or owns what.\n"
     "Return one JSON object with exactly these keys:\n"
     "- \"title\": 2 to 8 words naming the topic. Not a sentence, no full stop.\n"
     "- \"summary\": 2 to 4 sentences saying what the note is about and what was decided or concluded.\n"
-    "- \"key_points\": the 2 to 5 most important facts, decisions or deadlines, each a complete sentence. "
-    "An empty list when the note is short.\n"
+    "- \"key_points\": the 2 to 5 most important facts, decisions or deadlines, each a complete sentence that "
+    "does not just repeat the summary. An empty list when the note is short.\n"
     "- \"sections\": a list of objects with \"heading\" and \"bullets\". Group the content by topic, in the order "
-    "spoken. A heading has 1 to 5 words and names its topic (never \"Notes\", \"Details\" or \"Introduction\"). "
-    "Each section has 2 to 7 bullets and every bullet is one complete, clean sentence. When the speaker describes "
-    "steps in order, keep that order.\n"
-    "- \"action_items\": the tasks that someone has to do, each a short instruction that starts with a verb, "
-    "with the person who owns it when a name was given and the deadline when one was given. An empty list when "
-    "there are none.\n"
+    "spoken. A heading has 1 to 5 words and names its topic (never \"Notes\", \"Details\", \"Overview\" or "
+    "\"Introduction\"). Each section has as many bullets as its content needs, usually 2 to 7, and every bullet is "
+    "one complete, clean sentence with one idea, never a fragment. When the speaker describes steps in order, keep "
+    "that order.\n"
+    "- \"action_items\": the tasks that someone has to do, each a short instruction that starts with a verb. Name "
+    "the owner only when the speaker gave a name and the deadline only when the speaker gave one; never guess "
+    "either. An empty list when there are none.\n"
+    "Answer with the JSON object only."
+)
+
+GROQ_REVIEW_PROMPT = (
+    "You are the editor of notes that were written from the transcript of a spoken voice note. You receive the "
+    "transcript and the draft notes as JSON. The notes will be shared with team members or classmates who were not "
+    "there, so they must be accurate, complete and clear on their own. Check the draft against the transcript and "
+    "return an improved version.\n"
+    "Rules:\n"
+    "- Restore the important facts, decisions, names, figures and deadlines that the draft left out.\n"
+    "- Fix wrong attributions (who said, decided or owns what) and ideas that were merged or mixed up.\n"
+    "- Split a bullet that carries two ideas into two bullets. Remove duplicates, filler and remarks without content.\n"
+    "- Every bullet is one complete, clean sentence in a neutral tone: no \"I think\", no \"the speaker says\", no "
+    "talk about the recording itself.\n"
+    "- Make every heading specific: 1 to 5 words naming its topic, never generic (\"Notes\", \"Details\", "
+    "\"Overview\", \"Introduction\", \"Other\").\n"
+    "- An action item starts with a verb. It names the owner and the deadline only when the speaker said them; "
+    "never guess either.\n"
+    "- Keep the order of the speaker.\n"
+    "- Never invent anything. Every name, number and date must come from the transcript, written as it was said.\n"
+    "- {language_rule}\n"
+    "- When the draft is already good, return it with only small fixes. Do not shorten it.\n"
+    "Return one JSON object with the same keys as the draft: \"title\", \"summary\", \"key_points\", \"sections\" "
+    "(a list of objects with \"heading\" and \"bullets\") and \"action_items\".\n"
     "Answer with the JSON object only."
 )
 
 
-def groq_system_prompt(language: str = "auto") -> str:
+def _language_rule(language: str = "auto") -> str:
     lang = languages.lenient(language)
     if lang == "auto":
-        rule = "Write the notes in the language of the recording. Do not translate."
-    else:
-        name = languages.LANGUAGES[lang]
-        rule = f"The recording is in {name}. Write all the notes in {name}. Do not translate."
-    return GROQ_SYSTEM_PROMPT.format(language_rule=rule)
+        return ("Write the notes in the language of the recording. Do not translate. Every title, heading, bullet, "
+                "summary, key point and action item must be in that language, even though these instructions are "
+                "in English.")
+    name = languages.LANGUAGES[lang]
+    return (f"The recording is in {name}. Write all the notes in {name}. Do not translate. Every title, heading, "
+            f"bullet, summary, key point and action item must be in {name}, even though these instructions are in "
+            "English.")
+
+
+def groq_system_prompt(language: str = "auto") -> str:
+    return GROQ_SYSTEM_PROMPT.format(language_rule=_language_rule(language))
+
+
+def groq_review_prompt(language: str = "auto") -> str:
+    return GROQ_REVIEW_PROMPT.format(language_rule=_language_rule(language))
 
 
 def groq_head_prompt(language: str = "auto") -> str:
     lang = languages.lenient(language)
     same = "the same language" if lang == "auto" else languages.LANGUAGES[lang]
     return (
-        "You receive the summaries of consecutive parts of one long voice note. "
-        f"Write in {same}, do not translate, and never add facts, names, numbers or dates. "
-        "Return a JSON object with a short title of 2 to 8 words (not a sentence), "
-        "a summary of three or four sentences covering the whole note, an empty key_points list, "
-        "an empty sections list and an empty action_items list."
+        "You receive the summaries of consecutive parts of one long voice note, then the section headings and the "
+        "candidate key points of the whole note. "
+        f"Write in {same}, do not translate, and never add facts, names, numbers or dates that are not in them. "
+        "Return a JSON object with these keys: "
+        "\"title\": 2 to 8 words naming the topic of the whole note (not a sentence, not generic); "
+        "\"summary\": 3 to 5 sentences covering the whole note, in the order of the parts, saying what it is about "
+        "and what was decided or concluded; "
+        "\"key_points\": the 2 to 5 most important facts, decisions or deadlines of the whole note, each a complete "
+        "sentence, chosen among the candidates or condensed from them (merge candidates that say the same thing, "
+        "and do not repeat the summary); "
+        "\"sections\": an empty list; \"action_items\": an empty list."
     )
 
 
-def _retry_after(resp: httpx.Response, attempt: int) -> float:
+# ---- language check: a model told to write French or Arabic sometimes answers in English
+_ENGLISH_FUNCTION = set("the and of is are will with that this for be they their have has should".split())
+_ARABIC_CHAR = re.compile(r"[؀-ۿ]")
+_CJK_CHAR = re.compile(r"[぀-ヿ㐀-䶿一-鿿豈-﫿]")
+
+
+def _note_strings(notes: dict) -> list[str]:
+    out = [str(notes.get("title") or ""), str(notes.get("summary") or "")]
+    out += [_item_text(k) for k in _as_list(notes.get("key_points")) + _as_list(notes.get("actions"))]
+    for sec in _as_list(notes.get("sections")):
+        if isinstance(sec, dict):
+            out.append(str(sec.get("heading") or ""))
+            out += [_item_text(b) for b in _as_list(sec.get("bullets"))]
+    return [x for x in out if x.strip()]
+
+
+def _language_drift(notes: dict, language: str, source: str) -> bool:
+    """True when the notes are clearly not in the chosen language although the transcript is."""
+    lang = languages.lenient(language)
+    if lang in ("auto", "en"):
+        return False
+    text = " ".join(_note_strings(notes))
+    if lang in ("ar", "zh"):
+        rx = _ARABIC_CHAR if lang == "ar" else _CJK_CHAR
+
+        def share(t: str) -> float:
+            letters = [c for c in t if c.isalpha()]
+            return sum(1 for c in letters if rx.match(c)) / len(letters) if letters else 0.0
+
+        return sum(c.isalpha() for c in text) >= 20 and share(text) < 0.5 and share(source) >= 0.5
+
+    def english(t: str) -> tuple[int, float]:
+        words = re.findall(r"[^\W\d_]+", t.lower())
+        return len(words), (sum(1 for w in words if w in _ENGLISH_FUNCTION) / len(words) if words else 0.0)
+
+    count, ratio = english(text)
+    return count >= 25 and ratio >= 0.12 and english(source)[1] < 0.06
+
+
+def _retry_wait(resp: httpx.Response, attempt: int) -> float:
+    """The wait that Groq asks for (header, else the "try again in 7.6s" of the message), not capped."""
     try:
-        return min(float(resp.headers.get("retry-after", "")), 20.0)
+        return max(float(resp.headers.get("retry-after", "")), 0.0)
     except ValueError:
-        return 2.0 * (attempt + 1)
+        pass
+    m = re.search(r"try again in\s+(?:(\d+)m)?(\d+(?:\.\d+)?)(ms|s)", resp.text or "")
+    if m:
+        secs = float(m.group(2)) / (1000.0 if m.group(3) == "ms" else 1.0) + 60.0 * int(m.group(1) or 0)
+        return secs
+    return 2.0 * (attempt + 1)
+
+
+MAX_RETRY_WAIT = 20.0
+
+
+def _retry_after(resp: httpx.Response, attempt: int) -> float:
+    return min(_retry_wait(resp, attempt), MAX_RETRY_WAIT)
 
 
 def _action_text(item) -> str:
@@ -1524,15 +1739,20 @@ def _action_text(item) -> str:
     return str(item or "").strip()
 
 
-def _groq_chat(model: str, system: str, user: str) -> dict:
-    """One chat completion that returns a JSON object. Raises StructureError with a message safe to show."""
+def _groq_chat(model: str, system: str, user: str, optional: bool = False) -> dict:
+    """One chat completion that returns a JSON object. Raises StructureError with a message safe to show.
+
+    A rate limit or a server error is retried twice, waiting as long as Groq asks but never more than 20 seconds.
+    With `optional` (the review of a draft that is already good enough) the call is given up at once when Groq
+    asks for a longer wait than that.
+    """
     key = settings.groq_api_key
     if not key:
         raise StructureError("Groq is not configured.")
     payload = {
         "model": model,
         "temperature": 0.2,
-        "max_tokens": 4096,
+        "max_tokens": settings.groq_chat_max_tokens,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
     }
@@ -1547,6 +1767,8 @@ def _groq_chat(model: str, system: str, user: str) -> dict:
         except httpx.HTTPError:
             raise StructureError("Groq could not be reached.")
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            if optional and _retry_wait(resp, attempt) > MAX_RETRY_WAIT:
+                break
             time.sleep(_retry_after(resp, attempt))
             continue
         if resp.status_code == 400 and attempt < 2 and "json_validate_failed" in resp.text:
@@ -1567,20 +1789,111 @@ def _groq_chat(model: str, system: str, user: str) -> dict:
     return data
 
 
+def _bullet_count(notes: dict) -> int:
+    return sum(len(sec["bullets"]) for sec in notes["sections"])
+
+
+def _figures(notes: dict) -> set[str]:
+    return set(re.findall(r"\d+", " ".join(_note_strings(notes))))
+
+
+def _review_is_better(draft: dict, reviewed: dict, kept: int, language: str, source: str) -> bool:
+    """False when the reviewed notes are clearly worse than the draft (see structure_groq)."""
+    before, after = _bullet_count(draft), _bullet_count(reviewed)
+    if before - after > before / 3:  # lost more than a third of the bullets
+        return False
+    if kept - after > max(1, kept // 4):  # the checks had to throw out a lot: do not trust this answer
+        return False
+    if draft.get("actions") and not reviewed.get("actions"):
+        return False
+    old = _figures(draft)
+    if old and len(old - _figures(reviewed)) > len(old) / 2:  # most of the figures are gone
+        return False
+    return not _language_drift(reviewed, language, source)
+
+
+def _validated_head(raw: dict, text: str, language: str) -> dict:
+    """The title, summary and key points of a whole note, kept only when the transcript supports them."""
+    src = _Source(text, languages.lenient(language))
+
+    def ok(t: str) -> bool:
+        return src.numbers_ok(t, True) and src.names_ok(t)
+
+    title = _clean_title(raw.get("title"))
+    if not ok(title):
+        title = ""
+    summary = _tidy(raw.get("summary"))
+    if summary and not ok(summary):  # a summary may generalise, but it may not bring new numbers or names
+        summary = ""
+    points: list[str] = []
+    for k in _as_list(raw.get("key_points")):
+        k = _tidy(_item_text(k))
+        if k and ok(k) and src.support(k) >= 0.3 and not is_empty_remark(k) and not any(_near_duplicate(k, x) for x in points):
+            points.append(k)
+    return {"title": title, "summary": summary, "key_points": points[:5]}
+
+
 def structure_groq(
-    text: str, model: str, language: str = "auto", on_progress: Callable[[int, int], None] | None = None
+    text: str, model: str, language: str = "auto", on_progress: Callable[..., None] | None = None
 ) -> tuple[dict, int]:
-    """Structure with a Groq chat model. Returns (notes, number of pieces done by the fallback)."""
+    """Structure with a Groq chat model. Returns (notes, number of pieces done by the fallback).
+
+    Every piece is written, checked against the transcript and then (unless GROQ_REVIEW is 0) reviewed in a
+    second call that sees the transcript and the draft. The review is only used when it passes the same checks
+    and is not clearly worse; a review that fails keeps the draft. A note with several pieces gets its title,
+    summary and key points from one more call that sees the part summaries, the headings and the candidates.
+    """
     system = groq_system_prompt(language)
     lang = languages.lenient(language)
     label = "Detect the language of the recording." if lang == "auto" else f"Language: {languages.LANGUAGES[lang]}."
+
+    def write(piece: str) -> dict:
+        user = f"{label}\n\nTranscript:\n{piece}"
+        raw = _groq_chat(model, system, user)
+        if _language_drift(raw, lang, piece):  # one more try, with a firm reminder
+            name = languages.LANGUAGES[lang]
+            raw = _groq_chat(model, system, user + f"\n\nReminder: write every word of the notes in {name}, not in English.")
+            if _language_drift(raw, lang, piece):
+                raise StructureError(f"the notes were not written in {name}")
+        return raw
+
+    def refine(notes: dict, piece: str) -> dict:
+        return refine_model_notes(notes, piece, relaxed=True, language=lang)
+
+    review_system = groq_review_prompt(language)
+
+    def review(draft: dict, piece: str) -> dict:
+        shown = {"title": draft["title"], "summary": draft["summary"], "key_points": draft.get("key_points", []),
+                 "sections": draft["sections"], "action_items": draft.get("actions", [])}
+        user = (f"{label}\n\nTranscript:\n{piece}\n\nDraft notes (JSON):\n"
+                f"{json.dumps(shown, ensure_ascii=False)}")
+        raw = normalize_notes(_groq_chat(model, review_system, user, optional=True))
+        kept = _bullet_count(raw)
+        reviewed = refine(raw, piece)
+        if not _review_is_better(draft, reviewed, kept, lang, piece):
+            return draft
+        if not reviewed.get("key_points"):
+            reviewed["key_points"] = draft.get("key_points", [])
+        return reviewed
+
+    def final(digest: str, headings: list[str], candidates: list[str]) -> dict:
+        parts = [digest]
+        if headings:
+            parts.append("Section headings:\n" + "\n".join(f"- {h}" for h in headings[:40]))
+        if candidates:
+            parts.append("Candidate key points:\n" + "\n".join(f"- {c}" for c in candidates[:20]))
+        raw = _groq_chat(model, groq_head_prompt(language), "\n\n".join(parts))
+        return _validated_head(raw, text, lang)
+
     return _structure_pieces(
         text,
         GROQ_PIECE_CHARS,
-        lambda piece: _groq_chat(model, system, f"{label}\n\nTranscript:\n{piece}"),
+        write,
         lambda digest: _groq_chat(model, groq_head_prompt(language), digest),
-        lambda notes, piece: refine_model_notes(notes, piece, relaxed=True, language=lang),
+        refine,
         on_progress,
+        review=review if settings.groq_review else None,
+        final=final,
     )
 
 

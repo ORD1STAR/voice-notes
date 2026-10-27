@@ -141,3 +141,53 @@ def test_transcribe_chunks_passes_overlaps(tmp_path):
     client = make_client(lambda r: httpx.Response(200, json={"text": next(texts)}))
     out = transcribe.transcribe_chunks(files, client=client, overlaps=[0, 2.0])
     assert out == "we need to call Anna about the garden"
+
+
+# --------------------------------------------- Chinese text, rate limits, odd answers
+
+def test_merge_overlap_works_for_chinese_without_spaces():
+    a = "\u6211\u4eec\u9700\u8981\u5728\u5468\u4e94\u4e4b\u524d\u5b8c\u6210\u767b\u9646\u9875\u9762\u7684\u8bbe\u8ba1"
+    b = "\u5b8c\u6210\u767b\u9646\u9875\u9762\u7684\u8bbe\u8ba1\u7136\u540e\u53d1\u9001\u6587\u6848"
+    assert transcribe.merge_overlap(a, b) == "\u7136\u540e\u53d1\u9001\u6587\u6848"
+    unrelated = "\u4eca\u5929\u5929\u6c14\u5f88\u597d\u6211\u4eec\u53bb\u516c\u56ed\u6563\u6b65"
+    assert transcribe.merge_overlap(a, unrelated) == unrelated
+
+
+def test_join_puts_no_space_between_chinese_chunks():
+    parts = ["\u4f60\u597d\u3002", "\u4e16\u754c\u4f60\u597d\u3002"]
+    assert transcribe.join_transcripts(parts) == "\u4f60\u597d\u3002\u4e16\u754c\u4f60\u597d\u3002"
+    assert transcribe.join_transcripts(["Hello.", "\u4e16\u754c"]) == "Hello. \u4e16\u754c"
+
+
+def test_join_survives_a_chunk_that_is_only_a_repeat():
+    assert transcribe.join_transcripts(["we call Anna about the garden", "call Anna about the garden"], [0, 2.0]) == \
+        "we call Anna about the garden"
+
+
+def test_rate_limit_waits_as_long_as_the_service_asks(chunk, monkeypatch):
+    waits = []
+    monkeypatch.setattr(transcribe.time, "sleep", lambda s: waits.append(s))
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        if len(calls) == 1:
+            return httpx.Response(429, headers={"retry-after": "7"}, json={})
+        if len(calls) == 2:
+            return httpx.Response(429, headers={"retry-after": "soon"}, json={})
+        return httpx.Response(200, json={"text": "ok"})
+
+    assert transcribe.transcribe_file(chunk, client=make_client(handler)) == "ok"
+    assert waits[0] == 7.0 and 0 < waits[1] <= 30  # a header that is not a number falls back to a growing wait
+
+
+def test_rate_limit_that_never_clears_gives_a_plain_message(chunk):
+    client = make_client(lambda r: httpx.Response(429, json={}))
+    with pytest.raises(transcribe.TranscriptionError, match="rate limit"):
+        transcribe.transcribe_file(chunk, client=client, retries=2)
+
+
+def test_an_answer_that_is_not_an_object_is_an_error_not_a_crash(chunk):
+    client = make_client(lambda r: httpx.Response(200, json=["unexpected"]))
+    with pytest.raises(transcribe.TranscriptionError, match="unreadable"):
+        transcribe.transcribe_file(chunk, client=client)

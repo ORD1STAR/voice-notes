@@ -42,13 +42,16 @@ class FakeNet:
     """Stands in for httpx.get and httpx.post: Groq models and chat, and optionally Ollama."""
 
     def __init__(self, monkeypatch, models=("llama-3.3-70b-versatile", "whisper-large-v3-turbo", "llama-3.1-8b-instant"),
-                 chat=None, ollama=None):
+                 chat=None, ollama=None, review=False):
         self.models = list(models) if models is not None else None
         self.chat = chat if chat is not None else FR_NOTES
         self.ollama = ollama
         self.chat_calls: list[dict] = []
         self.model_calls = 0
         monkeypatch.setenv("USE_GROQ_CHAT", "1")
+        # The review pass doubles the calls. It is off here so that the older tests count one call per part;
+        # tests/test_review_pass.py switches it on.
+        monkeypatch.setenv("GROQ_REVIEW", "1" if review else "0")
         monkeypatch.setenv("GROQ_CHAT_URL", CHAT_URL)
         monkeypatch.setenv("GROQ_MODELS_URL", MODELS_URL)
         if ollama is not None:
@@ -274,7 +277,7 @@ def test_plan_and_status_name_the_engine_without_calling_the_network(monkeypatch
     net = FakeNet(monkeypatch)
     plan = structure.engine_plan()
     assert plan["engine"] == "groq:llama-3.3-70b-versatile" and plan["backup"]["engine"] == "rule-based"
-    assert structure.groq_status() == {"enabled": True, "model": "llama-3.3-70b-versatile", "reason": ""}
+    assert structure.groq_status() == {"enabled": True, "model": "llama-3.3-70b-versatile", "reason": "", "review": False}
     assert net.model_calls == 0 and net.chat_calls == []
     monkeypatch.setenv("USE_GROQ_CHAT", "0")
     assert structure.engine_plan()["engine"] == "rule-based"

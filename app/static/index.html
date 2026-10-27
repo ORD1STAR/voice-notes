@@ -6,6 +6,7 @@
   <title>Voice Notes</title>
   <meta name="description" content="Upload or record a voice note and get a transcript and structured notes with diagrams, ready to export as PDF, text or Markdown.">
   <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex, nofollow">
   <meta name="theme-color" content="#2447d6">
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="preload" href="/fonts/InstrumentSans-latin.woff2" as="font" type="font/woff2" crossorigin>
@@ -13,6 +14,17 @@
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
+
+  <header class="focus-bar" id="focus-bar" hidden>
+    <a class="brand" href="/" id="focus-brand">
+      <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <rect x="2" y="9" width="3.4" height="6" rx="1.7"/><rect x="7.2" y="5" width="3.4" height="14" rx="1.7"/>
+        <rect x="12.4" y="2" width="3.4" height="20" rx="1.7"/><rect x="17.6" y="7" width="3.4" height="10" rx="1.7"/>
+      </svg>
+      <span>Voice Notes</span>
+    </a>
+    <button type="button" class="btn small" id="share-top">Copy link</button>
+  </header>
 
   <div class="shell">
 
@@ -40,6 +52,8 @@
 
     <div class="stage">
       <main id="main">
+
+        <p class="loading" id="loading" role="status" hidden>Opening the note</p>
 
         <!-- Start -->
         <section id="view-start" aria-labelledby="start-title">
@@ -153,7 +167,11 @@
             <p class="method-title" id="progress-method-title"></p>
             <p class="method-text" id="progress-method-text"></p>
           </aside>
-          <p class="hint">Long recordings take a while, mostly while structuring. You can leave this page: the note will show up in your list when it is done.</p>
+          <p class="hint leave" id="leave-hint">
+            <span class="dot" aria-hidden="true"></span>
+            <span id="leave-text">The recording is safe on the server. You can close this tab: the note keeps being prepared and shows up in your list with a light blue dot when it is ready.</span>
+          </p>
+          <p class="hint">Long recordings take a while, mostly while structuring.</p>
         </section>
 
         <!-- Error -->
@@ -165,6 +183,16 @@
             <button type="button" class="btn primary" id="error-again" hidden>Try again</button>
             <button type="button" class="btn" id="error-retry">Try another file</button>
             <button type="button" class="btn quiet danger" id="error-remove" hidden>Remove this note</button>
+          </div>
+        </section>
+
+        <!-- Not found (share link with an unknown id) -->
+        <section id="view-missing" aria-labelledby="missing-title" hidden>
+          <p class="eyebrow">Not found</p>
+          <h1 id="missing-title" tabindex="-1">This note does not exist</h1>
+          <p class="lede">The link may be mistyped, or the note was deleted.</p>
+          <div class="actions">
+            <a class="btn primary" href="/" id="missing-home">Open Voice Notes</a>
           </div>
         </section>
 
@@ -190,6 +218,7 @@
               <a class="btn" id="exp-md" href="#" download>Markdown</a>
               <a class="btn" id="exp-txt" href="#" download>Text</a>
             </div>
+            <button type="button" class="btn" id="share" title="Copy the address of this note">Copy link</button>
             <label class="check"><input type="checkbox" id="with-transcript"> With transcript</label>
             <div class="toolbar-end">
               <button type="button" class="btn quiet" id="edit-notes" title="Correct the text of the notes">Edit notes</button>

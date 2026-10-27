@@ -220,3 +220,57 @@ def test_structure_receives_the_language(monkeypatch):
     jobs._update(job["id"], transcript=SAMPLE_TEXT, status="processing")
     jobs.run(job["id"])
     assert seen["language"] == "tr" and jobs.get(job["id"])["status"] == "done"
+
+
+# ------------------------------------------------ codes for Whisper, wording, guessing
+
+def test_chinese_and_arabic_reach_whisper_as_zh_and_ar(chunk):
+    for code in ("zh", "ar"):
+        assert f"\r\n\r\n{code}\r\n".encode() in send(chunk, language=code)
+    assert b"\r\n\r\nzh\r\n" in send(chunk, language=" ZH ")  # tidied, never sent as typed
+
+
+def test_an_unknown_language_is_never_sent_to_whisper(chunk):
+    assert b'name="language"' not in send(chunk, language="klingon")
+    assert b'name="language"' not in send(chunk, language="zh-CN")
+
+
+def test_detect_uses_the_chosen_language_first():
+    assert languages.detect("The team will meet and we have a plan for this", "fr") == "fr"
+
+
+def test_detect_guesses_from_script_and_common_words():
+    assert languages.detect("The team will meet on Monday and we have a plan for this project.") == "en"
+    assert languages.detect("Nous avons une r\u00e9union pour le projet et il faut que tout soit pr\u00eat dans la semaine.") == "fr"
+    assert languages.detect("El equipo tiene una reuni\u00f3n para el proyecto pero tambi\u00e9n hay mucho por hacer.") == "es"
+    assert languages.detect("Wir haben ein Treffen und es ist nicht so einfach mit der Planung f\u00fcr das Projekt.") == "de"
+    assert languages.detect("\u0627\u0644\u0641\u0631\u064a\u0642 \u0633\u064a\u062c\u062a\u0645\u0639 \u064a\u0648\u0645 \u0627\u0644\u0627\u062b\u0646\u064a\u0646 \u0644\u0645\u0646\u0627\u0642\u0634\u0629 \u0627\u0644\u0645\u0634\u0631\u0648\u0639") == "ar"
+    assert languages.detect("\u56e2\u961f\u5c06\u5728\u661f\u671f\u4e00\u5f00\u4f1a\u8ba8\u8bba\u65b0\u7684\u7f51\u7ad9\u53d1\u5e03\u8ba1\u5212") == "zh"
+
+
+def test_detect_says_none_when_unsure():
+    assert languages.detect("") is None and languages.detect("ok") is None
+    assert languages.detect("Plan 12 34 56 78 90 A B C D E F G") is None
+
+
+def test_wording_exists_for_every_language_and_falls_back_to_english():
+    keys = set(languages._EN)
+    for code in languages.NATIVE_NAMES:
+        assert keys <= set(languages._STRINGS[code]), code
+    assert languages.text("summary", "fr") == "R\u00e9sum\u00e9"
+    assert languages.text("summary", "xx") == "Summary" and languages.text("summary", None) == "Summary"
+
+
+def test_dates_and_durations_are_written_for_the_reader():
+    import datetime
+
+    d = datetime.datetime(2026, 3, 5, 10, 0)
+    assert languages.format_date(d, "en") == "5 March 2026"
+    assert languages.format_date(d, "fr") == "5 mars 2026"
+    assert languages.format_date(d, "es") == "5 de marzo de 2026"
+    assert languages.format_date(d, "de") == "5. M\u00e4rz 2026"
+    assert languages.format_date(d, "zh") == "2026\u5e743\u67085\u65e5"
+    assert languages.format_date(d, "ar") == "2026-03-05"
+    assert languages.format_duration(45) == "45 s" and languages.format_duration(754) == "13 min"
+    assert languages.format_duration(3900) == "1 h 05 min"
+    assert languages.format_duration(None) == "" and languages.format_duration(0) == ""
