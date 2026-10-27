@@ -19,7 +19,7 @@ def client():
 def fake_groq(monkeypatch):
     calls = []
 
-    def fake(path, client=None, retries=3):
+    def fake(path, client=None, retries=3, language=None):
         calls.append(path.name)
         return SAMPLE_TEXT
 
@@ -127,7 +127,7 @@ def test_full_flow_and_exports(client, make_audio, fake_groq, monkeypatch):
 
 @needs_ffmpeg
 def test_groq_failure_is_reported(client, make_audio, monkeypatch):
-    def boom(path, client=None, retries=3):
+    def boom(path, client=None, retries=3, language=None):
         raise transcribe.TranscriptionError("Groq rejected the API key. Check GROQ_API_KEY.")
 
     monkeypatch.setattr(transcribe, "transcribe_file", boom)
@@ -304,7 +304,7 @@ def test_failed_transcription_can_be_tried_again(client, make_audio, monkeypatch
 
     state = {"fail": True}
 
-    def flaky(path, client=None, retries=3):
+    def flaky(path, client=None, retries=3, language=None):
         if state["fail"]:
             raise transcribe.TranscriptionError("Groq did not answer in time.")
         return SAMPLE_TEXT
@@ -405,7 +405,7 @@ def test_rebuild_writes_the_notes_again_and_keeps_a_chosen_title(client):
 def test_a_failed_rebuild_keeps_the_earlier_notes(client, monkeypatch):
     from app import structure
 
-    def boom(text, on_progress=None):
+    def boom(text, on_progress=None, language="auto", report=None):
         raise structure.StructureError("The model fell over.")
 
     nid = done_note("Fine as it is", ["A kept point."], transcript=SAMPLE_TEXT)
