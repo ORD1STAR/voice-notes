@@ -1,5 +1,4 @@
 import json
-from collections import Counter
 
 import httpx
 import pytest
@@ -99,7 +98,8 @@ def test_ollama_engine_used_when_available(monkeypatch):
 
 
 def test_ollama_long_transcript_is_processed_in_pieces(monkeypatch):
-    payload = {"title": "Part", "summary": "Sum.", "sections": [{"heading": "H", "bullets": ["b"]}]}
+    payload = {"title": "Part", "summary": "Sum.", "sections": [
+        {"heading": "H", "bullets": ["Finish the landing page"]}, {"heading": "Budget", "bullets": ["Budget stays the same"]}]}
     fake_ollama(monkeypatch, payload)
     long_text = (SAMPLE_TEXT + " ") * 8
     notes, engine = structure.structure_transcript(long_text)
@@ -169,7 +169,7 @@ def test_one_bad_piece_does_not_discard_the_others(monkeypatch):
     """A model failure on one piece is covered by the rules for that piece only."""
     monkeypatch.setenv("USE_OLLAMA", "1")
     monkeypatch.setenv("OLLAMA_MODEL", "tiny:1b")
-    good = {"title": "Part", "summary": "Sum.", "sections": [{"heading": "H", "bullets": ["from the model"]}]}
+    good = {"title": "Part", "summary": "Sum.", "sections": [{"heading": "H", "bullets": ["Marketing needs the final copy"]}]}
     calls = {"n": 0}
 
     def fake_get(url, timeout=None):
@@ -187,8 +187,8 @@ def test_one_bad_piece_does_not_discard_the_others(monkeypatch):
     notes, engine = structure.structure_transcript((SAMPLE_TEXT + " ") * 12)
     assert engine == "ollama:tiny:1b (partly rule-based)"
     bullets = [b for s in notes["sections"] for b in s["bullets"]]
-    assert "from the model" in bullets
-    assert any("landing page" in b for b in bullets)
+    assert "Marketing needs the final copy" in bullets  # written by the model
+    assert any("landing page" in b for b in bullets)  # written by the rules for the piece that failed
 
 
 def test_model_that_keeps_failing_is_dropped_after_two_tries(monkeypatch):
@@ -253,12 +253,11 @@ def test_extract_actions_finds_tasks_and_keeps_the_task_clause():
     ]
     got = structure.extract_actions(sents)
     assert got == [
-        "I need to call Anna about the compost delivery",
-        "We should plan the clearing for that day",
-        "Remember to buy seeds",
-        "If it rains, we should move the event indoors",
-    ][:len(got)]
-    assert len(got) == 4  # questions and plain statements are not tasks
+        "Call Anna about the compost delivery",
+        "Plan the clearing for that day",
+        "Buy seeds",
+        "If it rains, move the event indoors",
+    ]  # worded as instructions; questions and plain statements are not tasks
 
 
 def test_extract_actions_french_and_limit():
@@ -270,7 +269,7 @@ def test_extract_actions_french_and_limit():
 
 def test_rule_based_notes_carry_action_items():
     notes = structure.structure_rules(GARDEN + " Remember to order the seeds before Friday.")
-    assert any("order the seeds" in a for a in notes["actions"])
+    assert any("order the seeds" in a.lower() for a in notes["actions"])
     assert notes["actions"] == [a for a in notes["actions"] if a]
     assert structure.normalize_notes({"title": "t", "sections": [{"heading": "h", "bullets": ["b"]}],
                                       "actions": ["- [ ] Call Anna", "call anna", ""]})["actions"] == ["Call Anna"]
@@ -295,7 +294,7 @@ def test_sections_follow_a_change_of_topic():
 
 def test_heading_prefers_a_repeated_word_pair():
     group = ["We build a compost bin from pallets.", "The compost bin needs a lid.", "Pallets are free from the shop."]
-    assert structure._heading(group, Counter(), set()) == "Compost bin"
+    assert structure._heading(group, [group], set()) == "Compost bin"
 
 
 def test_engine_plan_explains_why_the_fallback_is_used(monkeypatch):
@@ -318,7 +317,9 @@ def test_model_notes_get_actions_from_the_rules_when_the_model_gives_none(monkey
     fake_ollama(monkeypatch, payload)
     notes, engine = structure.structure_transcript("We talked a lot. I need to call Anna about the delivery tomorrow.")
     assert engine.startswith("ollama:")
-    assert notes["actions"] == ["I need to call Anna about the delivery tomorrow"]
-    payload["actions"] = ["Book the van"]
+    assert notes["actions"] == ["Call Anna about the delivery tomorrow"]
+    payload["actions"] = ["Phone Anna about the delivery", "Book the van"]
     notes, _ = structure.structure_transcript("We talked a lot. I need to call Anna about the delivery tomorrow.")
-    assert notes["actions"] == ["Book the van"]
+    # the model's own wording comes first; "Book the van" was never said, so it is dropped
+    assert notes["actions"][0] == "Phone Anna about the delivery"
+    assert "Book the van" not in notes["actions"]
