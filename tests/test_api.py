@@ -219,3 +219,155 @@ def test_static_files_are_revalidated_but_fonts_are_cached(client):
     assert client.get("/style.css").headers["cache-control"] == "no-cache"
     assert client.get("/app.js").headers["cache-control"] == "no-cache"
     assert "max-age" in client.get("/fonts/InstrumentSans-latin.woff2").headers["cache-control"]
+
+
+# ------------------------------------------- rename, search, retry, status
+
+def done_note(title, bullets, transcript="", filename="rec.m4a", actions=None, created=None):
+    from app import jobs
+
+    job = jobs.new_job(filename)
+    notes = {"title": title, "summary": f"About {title}.", "sections": [{"heading": "Main", "bullets": bullets}],
+             "actions": actions or []}
+    fields = dict(status="done", stage="done", notes=notes, transcript=transcript, engine="rule-based")
+    if created:
+        fields["created"] = created
+    jobs._update(job["id"], **fields)
+    return job["id"]
+
+
+def test_rename_changes_the_title_everywhere(client):
+    nid = done_note("Old title", ["A point."])
+    r = client.patch(f"/api/notes/{nid}", json={"title": "  A better\n title  "})
+    assert r.status_code == 200 and r.json()["notes"]["title"] == "A better title"
+    assert client.get("/api/notes").json()[0]["title"] == "A better title"
+    assert client.get(f"/api/notes/{nid}/export?format=md").text.startswith("# A better title")
+    cd = client.get(f"/api/notes/{nid}/export?format=pdf").headers["content-disposition"]
+    assert "a-better-title.pdf" in cd
+
+
+def test_rename_rejects_empty_and_unfinished(client):
+    from app import jobs
+
+    nid = done_note("Title", ["A point."])
+    assert client.patch(f"/api/notes/{nid}", json={"title": "   "}).status_code == 400
+    assert client.patch(f"/api/notes/{nid}", json={}).status_code == 422
+    pending = jobs.new_job("x.wav")
+    assert client.patch(f"/api/notes/{pending['id']}", json={"title": "Nope"}).status_code == 404
+    assert client.patch("/api/notes/deadbeef", json={"title": "Nope"}).status_code == 404
+    long = client.patch(f"/api/notes/{nid}", json={"title": "w" * 400}).json()["notes"]["title"]
+    assert len(long) == 100
+
+
+def test_search_looks_inside_the_notes_and_shows_where(client):
+    a = done_note("Garden plan", ["Build a compost bin from pallets."], "we talked about the garden and the shed",
+                  created=1000.0)
+    b = done_note("Budget", ["Revenue is down."], "revenue and costs, also a mention of compost", created=2000.0)
+    c = done_note("Other", ["Nothing relevant."], "", created=3000.0)
+    all_ids = [n["id"] for n in client.get("/api/notes").json()]
+    assert all_ids == [c, b, a]
+    hits = client.get("/api/notes", params={"q": "compost"}).json()
+    assert [h["id"] for h in hits] == [b, a]
+    assert "compost" in hits[0]["snippet"].lower() and "compost" in hits[1]["snippet"].lower()
+    assert [h["id"] for h in client.get("/api/notes", params={"q": "COMPOST pallets"}).json()] == [a]
+    assert client.get("/api/notes", params={"q": "zebra"}).json() == []
+    # a title match comes first, even if the note is older
+    d = done_note("Compost guide", ["Layers."], created=500.0)
+    assert [h["id"] for h in client.get("/api/notes", params={"q": "compost"}).json()][0] == d
+    # a search on the action items and on the file name
+    e = done_note("Chores", ["x"], actions=["Call the plumber"], filename="kitchen-sink.m4a")
+    assert [h["id"] for h in client.get("/api/notes", params={"q": "plumber"}).json()] == [e]
+    assert [h["id"] for h in client.get("/api/notes", params={"q": "kitchen-sink"}).json()] == [e]
+
+
+def test_health_explains_the_structuring_method(client):
+    h = client.get("/api/health").json()
+    assert h["structuring"]["engine"] == "rule-based"
+    assert "switched off" in h["structuring"]["reason"]  # the tests run with USE_OLLAMA=0
+
+
+def test_job_status_has_queue_position_and_elapsed_time(client):
+    from app import jobs
+
+    first = jobs.new_job("one.wav")
+    second = jobs.new_job("two.wav")
+    body = client.get(f"/api/notes/{second['id']}").json()
+    assert body["ahead"] == 1 and body["stage_elapsed"] >= 0
+    assert client.get(f"/api/notes/{first['id']}").json()["ahead"] == 0
+    nid = done_note("T", ["b"])
+    assert client.get(f"/api/notes/{nid}").json()["ahead"] == 0
+
+
+@needs_ffmpeg
+def test_failed_transcription_can_be_tried_again(client, make_audio, monkeypatch):
+    from app import jobs
+
+    state = {"fail": True}
+
+    def flaky(path, client=None, retries=3):
+        if state["fail"]:
+            raise transcribe.TranscriptionError("Groq did not answer in time.")
+        return SAMPLE_TEXT
+
+    monkeypatch.setattr(transcribe, "transcribe_file", flaky)
+    job_id = upload(client, make_audio(3)).json()["id"]
+    job = wait_done(client, job_id)
+    assert job["status"] == "error" and job["retryable"] is True and "try again" in job["error"].lower()
+    assert jobs.upload_path(job_id).exists()  # the recording is kept for the retry
+
+    state["fail"] = False
+    assert client.post(f"/api/notes/{job_id}/retry").status_code == 202
+    job = wait_done(client, job_id)
+    assert job["status"] == "done" and job["error"] is None and job["notes"]["sections"]
+    assert not jobs.upload_path(job_id).exists()  # cleaned up after success
+    assert client.post(f"/api/notes/{job_id}/retry").status_code == 409
+
+
+@needs_ffmpeg
+def test_a_bad_file_is_not_offered_a_retry(client, tmp_path, fake_groq):
+    f = tmp_path / "notes.txt"
+    f.write_text("hello, this is only text")
+    job_id = upload(client, f).json()["id"]
+    job = wait_done(client, job_id)
+    assert job["status"] == "error" and job["retryable"] is False
+    assert client.post(f"/api/notes/{job_id}/retry").status_code == 409
+    assert client.post("/api/notes/deadbeef/retry").status_code == 404
+
+
+def test_an_interrupted_note_can_be_resumed_from_its_transcript(client, monkeypatch):
+    from app import audio, jobs
+
+    job = jobs.new_job("late.wav")
+    jobs._update(job["id"], status="processing", stage="structuring", transcript=SAMPLE_TEXT)
+    jobs.load_all()  # the server restarts
+    again = jobs.get(job["id"])
+    assert again["status"] == "error" and again["retryable"] is True
+    monkeypatch.setattr(audio, "probe_duration", lambda p: (_ for _ in ()).throw(AssertionError("must not convert again")))
+    assert client.post(f"/api/notes/{job['id']}/retry").status_code == 202
+    assert wait_done(client, job["id"])["status"] == "done"
+
+
+def test_old_failed_uploads_are_removed_at_startup():
+    import time
+
+    from app import jobs
+
+    job = jobs.new_job("old.wav")
+    jobs.upload_path(job["id"]).write_bytes(b"audio")
+    jobs._update(job["id"], status="error", error="x", retryable=True, created=time.time() - 8 * 86400)
+    jobs.load_all()
+    assert not jobs.upload_path(job["id"]).exists()
+    assert jobs.get(job["id"])["retryable"] is False
+
+
+def test_a_waiting_note_already_knows_how_it_will_be_structured(client):
+    from app import jobs
+
+    job = jobs.new_job("w.wav")
+    jobs.run(job["id"])  # no upload: it fails at once, but the plan is recorded first
+    assert jobs.get(job["id"])["plan"]["engine"] == "rule-based"
+
+
+def test_progress_text_names_the_builtin_rules(client, make_audio, fake_groq):
+    job = wait_done(client, upload(client, make_audio(3)).json()["id"])
+    assert job["plan"]["engine"] == "rule-based" and job["plan"]["reason"]

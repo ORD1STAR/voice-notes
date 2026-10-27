@@ -1,5 +1,6 @@
 """FastAPI application: upload, status, export."""
 import re
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -7,6 +8,7 @@ from urllib.parse import quote
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from . import audio, export, jobs, structure, visuals
 from .config import settings
@@ -54,6 +56,8 @@ async def security_headers(request: Request, call_next):
 def _public(job: dict) -> dict:
     """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
     out = dict(job)
+    out["ahead"] = jobs.queue_ahead(job["id"]) if job.get("status") in ("queued", "processing") else 0
+    out["stage_elapsed"] = max(0, round(time.time() - job.get("stage_started", time.time())))
     if job.get("status") == "done" and job.get("notes"):
         out["visuals"] = visuals.build_visuals(job["notes"])
         out["transcript_paragraphs"] = structure.paragraphs(job.get("transcript") or "")
@@ -70,6 +74,7 @@ def health():
         "ffmpeg": audio.ffmpeg_available(),
         "groq_key": bool(settings.groq_api_key),
         "ollama": structure.ollama_status(),
+        "structuring": structure.engine_plan(),
         "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
     }
 
@@ -110,8 +115,8 @@ async def create_note(request: Request, file: UploadFile = File(...)):
 
 
 @app.get("/api/notes")
-def list_notes():
-    return jobs.list_jobs()
+def list_notes(q: str = ""):
+    return jobs.list_jobs(q[:200])
 
 
 @app.get("/api/notes/{job_id}")
@@ -120,6 +125,30 @@ def get_note(job_id: str):
     if not job:
         raise HTTPException(404, "This note does not exist.")
     return _public(job)
+
+
+class RenameBody(BaseModel):
+    title: str
+
+
+@app.patch("/api/notes/{job_id}")
+def rename_note(job_id: str, body: RenameBody):
+    try:
+        job = jobs.rename(job_id, body.title)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    if job is None:
+        raise HTTPException(404, "This note does not exist or is not finished yet.")
+    return _public(job)
+
+
+@app.post("/api/notes/{job_id}/retry", status_code=202)
+def retry_note(job_id: str):
+    if not jobs.get(job_id):
+        raise HTTPException(404, "This note does not exist.")
+    if not jobs.retry(job_id):
+        raise HTTPException(409, "This note cannot be tried again. Upload the recording once more.")
+    return {"id": job_id}
 
 
 @app.delete("/api/notes/{job_id}", status_code=204)
