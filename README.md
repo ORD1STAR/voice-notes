@@ -16,9 +16,11 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 
 - Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker, or record straight from the browser (needs https or localhost for microphone access).
 - Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined. Chunks are cut in the quiet gaps between words, so no word is split in two; when there is no gap, the next chunk starts two seconds early and the repeated words are removed when the texts are joined.
-- Structuring with a small local model served by Ollama. If Ollama is not running, a rule-based fallback still produces a title, summary and sections, and the interface says which one was used. If the model fails on one part of a long note, only that part falls back to the rules.
+- Structuring with a small local model served by Ollama. If Ollama is not running, a rule-based fallback still produces a title, summary, key points, sections and action items, and the interface says which one was used. If the model fails on one part of a long note, only that part falls back to the rules. See "How the notes are built" below.
+- Key points: the three to five things a reader must not miss (decisions, deadlines, figures, the stated priority) in a card above the action items, in the PDF and in the text exports. Older notes get them too, computed from their own bullets.
+- Rebuild notes: a finished note can be written again from its saved transcript with whatever engine is available now (for example after Ollama is installed), without uploading or transcribing again. A title you chose is kept, and if the rebuild fails the earlier notes stay.
 - Diagrams built from the notes where they help: a mind map of the sections, a process flow when the speaker describes steps in order, and a bar chart when several amounts or percentages are mentioned. They appear in the online notes and in the PDF. See the next section.
-- Action items: tasks the speaker sets for themselves ("I need to call...", "remember to...", "il faut...") are collected in a checklist with tick boxes in the page (remembered in your browser), as empty boxes in the PDF and as `- [ ]` lines in Markdown.
+- Action items: tasks the speaker sets for themselves ("I need to call...", "remember to...", "il faut..."), tasks given to a named person ("Maria will send...") and plain instructions ("Call the bank tomorrow") are collected in a checklist worded as short instructions ("Call Anna about the delivery"), with tick boxes in the page (remembered in your browser), as empty boxes in the PDF and as `- [ ]` lines in Markdown.
 - Export to PDF, TXT or Markdown, with or without the full transcript (split into readable paragraphs).
 - Rename a note, and search all your notes (titles, summaries, bullets, action items, file names and the full transcript) from the list.
 - Live progress through each step, with the time spent on the current step, the place in the queue and a clear statement of how the notes are built. When Ollama is not available the page says so, and why.
@@ -66,7 +68,21 @@ On Ubuntu, `sudo apt install ffmpeg` installs ffmpeg. A free Groq API key is ava
 ./scripts/setup-ollama.sh   # installs Ollama and pulls the default model
 ```
 
-The default model is `qwen2.5:1.5b`: about 1 GB on disk and comfortable on a 2 CPU, 4 GB machine. On two CPU cores it generates only a few words per second, so structuring a long recording takes minutes, not seconds; long transcripts are processed in pieces and the page shows progress. Pick another model with `OLLAMA_MODEL`. Without Ollama the app still works and uses the rule-based fallback, which keeps your sentences as bullets and groups them by topic words. The result is readable but much less polished.
+The default model is `qwen2.5:1.5b`: about 1 GB on disk and comfortable on a 2 CPU, 4 GB machine. On two CPU cores it generates only a few words per second, so structuring a long recording takes minutes, not seconds; long transcripts are processed in pieces and the page shows progress. Pick another model with `OLLAMA_MODEL`. Without Ollama the app still works and uses the rule-based fallback, which keeps your own sentences (cleaned of fillers) as bullets. The result is readable and organised, but the wording is the speaker's, not rewritten.
+
+## How the notes are built
+
+Both engines produce the same shape: title, summary, key points, sections with bullets, action items.
+
+**Rule-based (always available).**
+
+1. The transcript is cut into sentences (not after "Dr." or "5 p.m."; Chinese full stops count). Spoken filler is removed: "okay so", "um", "you know", "I think", "basically", repeated words. Remarks with no content ("That is a good call", "That's it", "Thank you") and repeated sentences are dropped, and fragments such as "which ..." are joined to the sentence before.
+2. The title is the topic when the speaker announces one ("a quick recap of the Monday sync", "a note about the garden project", "how I make the sourdough bread" becomes "How to make sourdough bread", also in French and Spanish). Otherwise it is the phrase that names the note best.
+3. Sections start where the vocabulary changes or where the speaker announces a new topic ("then we moved on to hiring", "the last topic was ..."). The announcement becomes the heading and is not repeated as a bullet. Other headings are the noun phrase that is most specific to the section ("Mobile release", "Customer feedback"), never a unit, number word or filler verb. A list of steps is kept in one section and none of its steps is dropped; in long sections only the most important points are kept (the transcript still has everything).
+4. The summary is the best opening sentence plus the strongest sentences of other sections. Key points are chosen by cues (decided, agreed, most important, urgent, deadline, delayed, a figure, a date, a proposal); sentences that are tasks or steps are left out because they have their own places.
+5. Action items are worded as instructions. "Remember to buy seeds" becomes "Buy seeds", "I need to ask Tom to profile the export code" becomes "Ask Tom to profile the export code", "Maria will send the job description by Wednesday" becomes "Maria: send the job description by Wednesday", and "that is something we should fix before launch" borrows the thing from the sentence before ("Fix PDF export before launch"). "You" in a how-to, things that "must" happen to an object and plain predictions are not tasks.
+
+**Local model (when Ollama is running with the model).** Each piece of about 3500 characters is sent with strict instructions and one worked example, at a low temperature. Nothing the model returns is trusted blindly: bullets, key points and actions whose words or numbers are not in the transcript are dropped, filler and empty remarks are removed, repeated points are merged, a generic title or heading ("Notes", "Details") is replaced by one from the rules, and tasks the model left out are added from the rules. If nothing usable is left, that piece falls back to the rules. The model is what gives rewritten, shorter bullets; the checks are what keep it honest. The Ollama path is covered by tests against a fake Ollama only; it has not been run against a real model on this server yet.
 
 ## Configuration
 
@@ -106,8 +122,8 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 1. The upload is saved to disk in 1 MB blocks and refused as soon as it passes the size limit.
 2. ffmpeg converts it to mono 16 kHz MP3 and cuts it into chunks. At 48 kbit/s ten minutes are about 3.6 MB, so even a 4 hour recording stays far below the Groq limit per file. Each cut is made at the quiet gap closest to the target length (found with ffmpeg's `silencedetect`).
 3. Each chunk is sent to Groq Whisper. Rate limits and temporary errors are retried with backoff. Chunks that had to start in the middle of speech repeat two seconds of the one before; the repeated words are found with a fuzzy match and removed.
-4. The joined transcript is split on sentence boundaries into pieces of about 3500 characters. Each piece goes to the local model, which answers in JSON (title, summary, sections with bullets). A final short call writes the overall title and summary.
-5. If Ollama is missing or a call fails, the rule-based structuring takes over (for the whole note when the model is missing, and only for the failing part when it fails on one piece). The rules remove spoken filler and repeated sentences, start a new section where the vocabulary changes, name sections after their most repeated word pair, take the title from "a note about ..." openings and collect the action items.
+4. The joined transcript is split on sentence boundaries into pieces of about 3500 characters. Each piece goes to the local model, which answers in JSON (title, summary, key points, sections with bullets, actions) and whose answer is checked against the transcript. A final short call writes the overall title and summary.
+5. If Ollama is missing or a call fails, the rule-based structuring takes over (for the whole note when the model is missing, and only for the failing part when it fails on one piece). The rules do everything described in "How the notes are built".
 
 ## API
 
@@ -119,6 +135,7 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `GET` | `/api/notes/{id}` | Status, progress and, once done, the notes, the transcript (also as `transcript_paragraphs`) and the `visuals` drawings. |
 | `PATCH` | `/api/notes/{id}` | Rename a finished note: `{"title": "..."}`. |
 | `POST` | `/api/notes/{id}/retry` | Run a failed note again (202), or 409 when it cannot be retried. |
+| `POST` | `/api/notes/{id}/restructure` | Write the notes of a finished note again from its transcript (202), or 409 when it is not finished or has no transcript. The earlier notes stay until the new ones are ready, and stay if the rebuild fails (`rebuild_error` says why). |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
@@ -136,7 +153,7 @@ playwright install chromium
 pytest tests/e2e
 ```
 
-They cover renaming, searching, the checklist, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
+They cover renaming, searching, key points, the checklist, rebuilding notes, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
 
 ## Project layout
 
@@ -161,7 +178,8 @@ deploy/           example systemd unit
 - Very noisy recordings may have no quiet gaps; the overlap then does the work, and a repeated phrase at the exact seam can occasionally be dropped or kept twice.
 - PDF export covers Latin, Greek and Cyrillic text. Arabic, Hebrew and Chinese are not rendered correctly yet.
 - A note can be renamed, but its text cannot be edited in the interface yet.
-- Action items are found with simple phrases ("need to", "should", "remember to" and a few French and Spanish ones). A task said in other words is not picked up.
+- Action items are found with simple phrases ("need to", "should", "remember to", "Maria will ...", a few French and Spanish ones). A task said in other words is not picked up. The rules are written for English; French and Spanish get titles, tasks and sections but with simpler headings.
+- Without a model the bullets stay close to the speaker's words. Only the model rewrites sentences.
 - Diagrams use simple rules on the note text. A note that never says its steps in order or never gives numbers will not get a process or chart, by design.
 - Recording in the browser is only offered on https or localhost, because browsers block the microphone elsewhere.
 
