@@ -730,10 +730,6 @@ def extract_actions(sentences: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- sections
 
-def _stem(word: str) -> str:
-    return word[:-1] if len(word) > 4 and word.endswith("s") else word
-
-
 def _similarity(left: list[str], right: list[str]) -> float:
     a = Counter(_stem(w) for s in left for w in _kw(s))
     b = Counter(_stem(w) for s in right for w in _kw(s))
@@ -991,6 +987,9 @@ SUMMARY_PROMPT = (
 
 GENERIC_TITLES = {"notes", "note", "voice note", "summary", "untitled", "untitled note", "meeting notes", "transcript",
                   "title", "recording", "voice recording", "notes from the recording"}
+ACTION_HEADINGS = {"action items", "action item", "actions", "next steps", "to do", "to-do", "todo", "tasks", "to dos",
+                   "follow up", "follow-up", "follow ups", "actions to take", "prochaines etapes", "prochaines \u00e9tapes",
+                   "actions \u00e0 faire", "t\u00e2ches", "\u00e0 faire", "pr\u00f3ximos pasos", "tareas", "acciones"}
 GENERIC_HEADINGS = {"notes", "note", "details", "introduction", "summary", "overview", "main points", "other",
                     "miscellaneous", "general", "main topic", "key points", "content", "topic", "conclusion"}
 
@@ -1182,6 +1181,35 @@ def _tidy(text) -> str:
     return s[:1].upper() + s[1:] if s else ""
 
 
+def _covers(task: str, other: str) -> bool:
+    """True when almost every content word of the shorter text is in the longer one (the same task, worded twice)."""
+    a, b = set(_kw(task)), set(_kw(other))
+    if not a or not b:
+        return False
+    return len(a & b) / min(len(a), len(b)) >= 0.75
+
+
+def _without_repeated_tasks(sections: list[dict], actions: list[str]) -> list[dict]:
+    """Drop bullets that are a task already in the checklist ("I need to ask Tom ..." next to "Ask Tom ...").
+
+    A small model often writes each task as its own one-point section as well. Nothing is dropped when it would
+    leave the notes empty.
+    """
+    if not actions:
+        return sections
+    out = []
+    for sec in sections:
+        keep = []
+        for b in sec["bullets"]:
+            tasks = extract_actions([b])
+            if tasks and any(_covers(tasks[0], a) for a in actions):
+                continue
+            keep.append(b)
+        if keep:
+            out.append({"heading": sec["heading"], "bullets": keep})
+    return out or sections
+
+
 def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language: str = "auto") -> dict:
     """Check what a model returned against the transcript and repair it with the rules.
 
@@ -1233,6 +1261,19 @@ def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language
         if not heading or heading.lower() in GENERIC_HEADINGS or len(heading.split()) > 7 or not label_ok(heading):
             heading = best_phrase(bullets) or short_phrase(heading, 5) or "Notes"
         sections.append({"heading": heading, "bullets": bullets})
+    # A section that only lists tasks ("Action items", "Next steps") repeats the checklist: its tasks move there.
+    moved: list[str] = []
+    kept = []
+    for sec in sections:
+        if sec["heading"].lower().strip(" :.") in ACTION_HEADINGS:
+            tasks = [b for b in sec["bullets"] if extract_actions([b])]
+            rest = [b for b in sec["bullets"] if b not in tasks]
+            moved += tasks
+            if rest:
+                kept.append({"heading": sec["heading"], "bullets": rest})
+        else:
+            kept.append(sec)
+    sections = kept
     if not sections:
         raise StructureError("the model produced no usable bullets")
 
@@ -1252,6 +1293,11 @@ def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language
         if not actions:  # a small model often leaves the tasks out; when it lists some, its wording is kept
             actions = extract_actions(_prepare_sentences(source))
         key_points = [k for k in notes.get("key_points") or [] if supported(k) and not is_empty_remark(k)]
+    for task in extract_actions(moved):
+        if not any(_near_duplicate(task, a) for a in actions):
+            actions.append(task)
+    if not relaxed:  # a strong model's wording is trusted; a small one repeats its tasks as one-point sections
+        sections = _without_repeated_tasks(sections, actions)
     return normalize_notes({"title": title, "summary": summary, "key_points": key_points, "sections": sections,
                             "actions": actions})
 
@@ -1503,6 +1549,8 @@ def _groq_chat(model: str, system: str, user: str) -> dict:
         if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
             time.sleep(_retry_after(resp, attempt))
             continue
+        if resp.status_code == 400 and attempt < 2 and "json_validate_failed" in resp.text:
+            continue  # the model broke its own JSON; asking again almost always works
         break
     if resp.status_code in (401, 403):
         raise StructureError("Groq rejected the API key.")
