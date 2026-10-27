@@ -64,14 +64,20 @@ def _retry_delay(resp: httpx.Response, attempt: int) -> float:
     return min(2.0 ** attempt * 2, 30.0)
 
 
-def transcribe_file(path: Path, client: httpx.Client | None = None, retries: int = 3) -> str:
-    """Send one audio file to Groq and return its text."""
+def transcribe_file(path: Path, client: httpx.Client | None = None, retries: int = 3,
+                    language: str | None = None) -> str:
+    """Send one audio file to Groq and return its text.
+
+    `language` is an ISO 639-1 code. "auto" leaves the parameter out so Whisper detects the language.
+    None uses the server default (TRANSCRIPTION_LANGUAGE), which is automatic detection when unset.
+    """
     key = settings.groq_api_key
     if not key:
         raise TranscriptionError("The server has no GROQ_API_KEY configured.")
     data = {"model": settings.groq_model, "response_format": "json", "temperature": "0"}
-    if settings.language:
-        data["language"] = settings.language
+    code = settings.language if language is None else language
+    if code and code != "auto":
+        data["language"] = code
     own = client is None
     client = client or httpx.Client(timeout=httpx.Timeout(300.0, connect=15.0))
     try:
@@ -121,12 +127,13 @@ def transcribe_chunks(
     on_progress: Callable[[int, int], None] | None = None,
     client: httpx.Client | None = None,
     overlaps: list[float] | None = None,
+    language: str | None = None,
 ) -> str:
     parts = []
     for i, chunk in enumerate(chunks):
         if on_progress:
             on_progress(i, len(chunks))
-        parts.append(transcribe_file(chunk, client=client))
+        parts.append(transcribe_file(chunk, client=client, language=language))
     if on_progress:
         on_progress(len(chunks), len(chunks))
     return join_transcripts(parts, overlaps)

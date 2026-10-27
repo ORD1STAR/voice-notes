@@ -1,17 +1,26 @@
 """FastAPI application: upload, status, export."""
+import logging
 import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audio, export, jobs, structure, visuals
+from . import audio, export, jobs, languages, structure, visuals
 from .config import settings
+
+# The app's own log lines (which engine wrote each note) go to the console next to the server's lines.
+_log = logging.getLogger("voice_notes")
+if not _log.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    _log.addHandler(_handler)
+    _log.setLevel(logging.INFO)
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 READ_SIZE = 1024 * 1024
@@ -56,6 +65,8 @@ async def security_headers(request: Request, call_next):
 def _public(job: dict) -> dict:
     """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
     out = dict(job)
+    out["language"] = languages.lenient(job.get("language"))  # notes saved before the language field are automatic
+    out["language_name"] = languages.name(out["language"])
     out["ahead"] = jobs.queue_ahead(job["id"]) if job.get("status") in ("queued", "processing") else 0
     out["stage_elapsed"] = max(0, round(time.time() - job.get("stage_started", time.time())))
     if job.get("status") == "done" and job.get("notes"):
@@ -75,13 +86,19 @@ def health():
         "ffmpeg": audio.ffmpeg_available(),
         "groq_key": bool(settings.groq_api_key),
         "ollama": structure.ollama_status(),
+        "groq_chat": structure.groq_status(),
         "structuring": structure.engine_plan(),
+        "languages": [{"code": c, "name": n} for c, n in languages.LANGUAGES.items()],
         "max_upload_mb": settings.max_upload_bytes // (1024 * 1024),
     }
 
 
 @app.post("/api/notes", status_code=202)
-async def create_note(request: Request, file: UploadFile = File(...)):
+async def create_note(request: Request, file: UploadFile = File(...), language: str | None = Form(None)):
+    try:
+        lang = languages.normalize(settings.language if language is None else language)
+    except ValueError:
+        raise HTTPException(400, f"The language must be one of: {languages.allowed_text()}.")
     if not settings.groq_api_key:
         raise HTTPException(503, "The server has no GROQ_API_KEY configured, so it cannot transcribe yet.")
     if not audio.ffmpeg_available():
@@ -92,7 +109,7 @@ async def create_note(request: Request, file: UploadFile = File(...)):
         raise HTTPException(413, f"The file is larger than {limit // (1024 * 1024)} MB.")
 
     name = re.sub(r"[\x00-\x1f/\\]", "", file.filename or "recording").strip() or "recording"
-    job = jobs.new_job(name)
+    job = jobs.new_job(name, lang)
     dest = jobs.upload_path(job["id"])
     size = 0
     try:

@@ -4,6 +4,10 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# A 70B-class instruction model on Groq. It follows a JSON format reliably and writes well in the
+# languages offered on the start page.
+DEFAULT_GROQ_CHAT_MODEL = "llama-3.3-70b-versatile"
+
 
 def _int(name: str, default: int) -> int:
     try:
@@ -49,6 +53,27 @@ class Settings:
     @property
     def ollama_timeout(self) -> int:
         return _int("OLLAMA_TIMEOUT", 240)
+
+    @property
+    def use_groq_chat(self) -> bool:
+        """Structure notes with a Groq chat model first (needs GROQ_API_KEY)."""
+        return os.environ.get("USE_GROQ_CHAT", "1").lower() not in ("0", "false", "no", "off")
+
+    @property
+    def groq_chat_url(self) -> str:
+        return os.environ.get("GROQ_CHAT_URL", "https://api.groq.com/openai/v1/chat/completions")
+
+    @property
+    def groq_models_url(self) -> str:
+        return os.environ.get("GROQ_MODELS_URL", "https://api.groq.com/openai/v1/models")
+
+    @property
+    def groq_chat_model(self) -> str:
+        return os.environ.get("GROQ_CHAT_MODEL", "").strip() or DEFAULT_GROQ_CHAT_MODEL
+
+    @property
+    def groq_chat_timeout(self) -> int:
+        return _int("GROQ_CHAT_TIMEOUT", 90)
 
     @property
     def data_dir(self) -> Path:

@@ -1,8 +1,8 @@
 """Turn a raw transcript into structured notes.
 
-The preferred engine is a small local model served by Ollama. When Ollama is
-not running, or the model is missing, or a call fails, a rule-based fallback
-is used so a transcript always ends up as readable notes.
+The preferred engine is a strong chat model on Groq. When Groq cannot be used, a small local model served
+by Ollama is tried, and when that is not available either (or a call fails), a rule-based fallback is used,
+so a transcript always ends up as readable notes.
 
 Notes have this shape:
     {"title": str, "summary": str, "key_points": [str],
@@ -10,14 +10,19 @@ Notes have this shape:
 "key_points" and "actions" are optional.
 """
 import json
+import logging
 import math
 import re
+import time
 from collections import Counter
 from typing import Callable
 
 import httpx
 
+from . import languages
 from .config import settings
+
+log = logging.getLogger("voice_notes.structure")
 
 STOPWORDS = set(
     """a about above after again all also am an and any are as at be because been before being below between
@@ -926,6 +931,57 @@ EXAMPLE_NOTES = {
     "actions": ["Buy a new bell before Saturday"],
 }
 
+EXAMPLE_TRANSCRIPT_FR = (
+    "Alors, euh, je voulais noter le plan pour réparer mon vélo. Le pneu avant a une fuite lente, je pense que c'est "
+    "la valve. Donc d'abord je démonte la roue, ensuite je remplace la chambre à air. Ça coûte environ 8 euros au "
+    "magasin de la rue Victor Hugo. Il faut aussi que j'achète une nouvelle sonnette avant samedi, parce qu'on roule "
+    "avec Tom."
+)
+EXAMPLE_NOTES_FR = {
+    "title": "Réparation du vélo",
+    "summary": "Le pneu avant du vélo a une fuite lente, probablement au niveau de la valve. Le plan est de remplacer "
+               "la chambre à air, qui coûte environ 8 euros.",
+    "key_points": ["La fuite lente vient probablement de la valve.", "Une chambre à air coûte environ 8 euros."],
+    "sections": [
+        {"heading": "Pneu crevé", "bullets": ["Le pneu avant a une fuite lente, probablement au niveau de la valve.",
+                                              "D'abord, démonter la roue.", "Ensuite, remplacer la chambre à air."]},
+        {"heading": "Coûts", "bullets": ["Une chambre à air coûte environ 8 euros au magasin de la rue Victor Hugo."]},
+    ],
+    "actions": ["Acheter une nouvelle sonnette avant samedi"],
+}
+
+_FR_WORDS = set("le la les des est une pour que qui dans pas donc avec sur mais ça il faut on je nous vous du au et en ce".split())
+_EN_WORDS = set("the and to of is that for with we it in this have will are was be on".split())
+
+
+def guess_language(text: str, language: str = "auto") -> str:
+    """Returns en, fr or other: the chosen language, or a guess from common words when it is automatic."""
+    lang = languages.lenient(language)
+    if lang != "auto":
+        return lang if lang in ("en", "fr") else "other"
+    words = re.findall(r"[^\W\d_]+", text.lower())
+    fr = sum(1 for w in words if w in _FR_WORDS)
+    en = sum(1 for w in words if w in _EN_WORDS)
+    if fr >= 3 and fr > en * 1.3:
+        return "fr"
+    if en >= 3 and en > fr * 1.3:
+        return "en"
+    return "other"
+
+
+def ollama_example(text: str, language: str = "auto"):
+    """The worked example sent with the request: one in the language of the recording, none for other languages.
+
+    A small model copies the language of the example, so an English example would turn a French note into English.
+    """
+    kind = guess_language(text, language)
+    if kind == "fr":
+        return EXAMPLE_TRANSCRIPT_FR, EXAMPLE_NOTES_FR
+    if kind == "en":
+        return EXAMPLE_TRANSCRIPT, EXAMPLE_NOTES
+    return None
+
+
 SUMMARY_PROMPT = (
     "You receive the summaries of consecutive parts of one long voice note. "
     "Write in the same language. Return JSON with a short title of 2 to 6 words (not a sentence), "
@@ -955,7 +1011,19 @@ def ollama_status() -> dict:
 
 
 def engine_plan() -> dict:
-    """Which engine will structure the next note, and when it is the fallback, why."""
+    """Which engine will structure the next note and, when the first choice is not available, why.
+
+    With Groq in use, "backup" says what happens if Groq fails.
+    """
+    local = _ollama_plan()
+    if groq_enabled():
+        model = groq_status()["model"]
+        return {"engine": f"groq:{model}", "model": model, "reason": "", "backup": local}
+    return local
+
+
+def _ollama_plan() -> dict:
+    """The local part of the plan: the Ollama model when it is there, else the rules and why."""
     st = ollama_status()
     model = st["model"]
     if st["available"]:
@@ -968,11 +1036,13 @@ def engine_plan() -> dict:
     return {"engine": "rule-based", "model": model, "reason": reasons.get(st["reason"], "The local model is not available.")}
 
 
-def _ollama_chat(system: str, user: str, example: bool = False) -> dict:
+def _ollama_chat(system: str, user: str, example=False) -> dict:
+    """`example` is True for the English example, a (transcript, notes) pair for another one, or False for none."""
     messages = [{"role": "system", "content": system}]
     if example:  # one worked example helps small models keep to the format and the style
-        messages += [{"role": "user", "content": f"Transcript:\n{EXAMPLE_TRANSCRIPT}"},
-                     {"role": "assistant", "content": json.dumps(EXAMPLE_NOTES)}]
+        sample_text, sample_notes = (EXAMPLE_TRANSCRIPT, EXAMPLE_NOTES) if example is True else example
+        messages += [{"role": "user", "content": f"Transcript:\n{sample_text}"},
+                     {"role": "assistant", "content": json.dumps(sample_notes, ensure_ascii=False)}]
     messages.append({"role": "user", "content": user})
     payload = {
         "model": settings.ollama_model,
@@ -999,21 +1069,145 @@ def _clean_title(title: str) -> str:
     return t
 
 
-def refine_model_notes(notes: dict, source: str) -> dict:
-    """Check what a small model returned against the transcript and repair it with the rules.
+_NUMBER_SPECS = (
+    "one=1 two=2 three=3 four=4 five=5 six=6 seven=7 eight=8 nine=9 ten=10 eleven=11 twelve=12 thirteen=13 "
+    "fourteen=14 fifteen=15 sixteen=16 seventeen=17 eighteen=18 nineteen=19 twenty=20 thirty=30 forty=40 fifty=50 "
+    "sixty=60 seventy=70 eighty=80 ninety=90 hundred=100 thousand=1000 million=1000000",
+    "un=1 une=1 deux=2 trois=3 quatre=4 cinq=5 sept=7 huit=8 neuf=9 dix=10 onze=11 douze=12 treize=13 quatorze=14 "
+    "quinze=15 seize=16 vingt=20 trente=30 quarante=40 cinquante=50 soixante=60 cent=100 mille=1000",
+    "uno=1 una=1 dos=2 tres=3 cuatro=4 cinco=5 seis=6 siete=7 ocho=8 nueve=9 diez=10 doce=12 trece=13 catorce=14 "
+    "quince=15 veinte=20 treinta=30 cuarenta=40 cincuenta=50 sesenta=60 setenta=70 ochenta=80 noventa=90 cien=100 mil=1000",
+    "eins=1 zwei=2 drei=3 vier=4 fünf=5 sechs=6 sieben=7 acht=8 neun=9 zehn=10 elf=11 zwölf=12 zwanzig=20 "
+    "dreißig=30 vierzig=40 fünfzig=50 sechzig=60 siebzig=70 achtzig=80 neunzig=90 hundert=100 tausend=1000",
+    "due=2 tre=3 quattro=4 cinque=5 sette=7 otto=8 dieci=10 undici=11 dodici=12 venti=20 trenta=30 quaranta=40 "
+    "cinquanta=50 sessanta=60 settanta=70 ottanta=80 novanta=90 cento=100",
+    "dois=2 duas=2 três=3 oito=8 dez=10 doze=12 vinte=20 trinta=30 quarenta=40 cinquenta=50 sessenta=60 setenta=70 "
+    "oitenta=80 noventa=90 cem=100",
+    "bir=1 iki=2 üç=3 dört=4 beş=5 altı=6 yedi=7 sekiz=8 dokuz=9 yirmi=20 otuz=30 kırk=40 elli=50 altmış=60 "
+    "yetmiş=70 seksen=80 doksan=90 yüz=100",
+)
+NUMBER_WORDS: dict[str, int] = {w: int(v) for spec in _NUMBER_SPECS for w, v in (p.split("=") for p in spec.split())}
+
+_CJK_RUN = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+")
+_AR_MARKS = re.compile(r"[\u064b-\u065f\u0670\u0640]")
+_AR_PREFIX = re.compile(r"^(?:وال|بال|كال|فال|لل|ال|و)(?=.{3,})")
+_TOKEN = re.compile(r"[^\W\d_]+")
+_NOT_NAME_START = ".!?:;…\"“«(-•*\n"
+
+
+def _starts_sentence(text: str, pos: int) -> bool:
+    before = text[max(0, pos - 4):pos].rstrip()
+    return not before or before[-1] in _NOT_NAME_START
+
+
+def _stem(word: str) -> str:
+    """A short form of a word, so that endings and Arabic prefixes do not hide a match."""
+    w = word.lower()
+    if re.search(r"[\u0600-\u06ff]", w):
+        w = _AR_PREFIX.sub("", _AR_MARKS.sub("", w))
+    return w[:5]
+
+
+def _bigrams(text: str) -> set[str]:
+    out: set[str] = set()
+    for run in _CJK_RUN.findall(text):
+        out |= {run[i:i + 2] for i in range(len(run) - 1)}
+    return out
+
+
+def _number_word_values(text: str) -> set[int]:
+    """Numbers that the transcript spells out as words ("twenty", "cinq", "veinticinco" is not covered)."""
+    vals = {NUMBER_WORDS[w] for w in _TOKEN.findall(text.lower()) if w in NUMBER_WORDS}
+    tens = {v for v in vals if 20 <= v < 100}
+    units = {v for v in vals if 1 <= v <= 9}
+    extra = {t + u for t in tens for u in units}
+    small = {v for v in vals | extra if v < 100}
+    for big in (v for v in vals if v in (100, 1000, 1000000)):
+        extra |= {big * k for k in small}
+    return vals | extra
+
+
+class _Source:
+    """What the transcript contains, used to check that notes only say what was said."""
+
+    def __init__(self, text: str, language: str = "auto"):
+        flat = _CJK_RUN.sub(" ", text)
+        self.stems = {_stem(w) for w in _kw(flat)}
+        self.all_stems = {_stem(w) for w in re.findall(r"[^\W\d_]{2,}", flat.lower())}
+        self.bigrams = _bigrams(text)
+        self.digits = {int(d) for d in re.findall(r"\d+", text)}
+        self.number_words = _number_word_values(text)
+        mid = [m.group(0) for m in _TOKEN.finditer(flat) if len(m.group(0)) >= 3 and not _starts_sentence(flat, m.start())]
+        caps = sum(1 for t in mid if t[0].isupper())
+        # German writes every noun with a capital letter, so capitals say nothing about names there.
+        self.capitals_are_nouns = language == "de" or (len(mid) >= 15 and caps / len(mid) > 0.18)
+
+    def support(self, text: str) -> float:
+        """The share of the content words of `text` that appear in the transcript (stems, or pairs of characters)."""
+        words = _kw(_CJK_RUN.sub(" ", text))
+        pairs = _bigrams(text)
+        total = len(words) + len(pairs)
+        if not total:
+            return 1.0
+        found = sum(1 for w in words if _stem(w) in self.stems) + sum(1 for p in pairs if p in self.bigrams)
+        return found / total
+
+    def numbers_ok(self, text: str, lenient: bool = False) -> bool:
+        for d in re.findall(r"\d+", text):
+            n = int(d)
+            if n in self.digits or n <= 12 or (lenient and n in self.number_words):
+                continue
+            return False
+        return True
+
+    def names_ok(self, text: str) -> bool:
+        """Capitalised words in the middle of a sentence (names, places, products) must occur in the transcript."""
+        if self.capitals_are_nouns:
+            return True
+        for m in _TOKEN.finditer(text):
+            tok = m.group(0)
+            if len(tok) < 3 or not tok[0].isupper() or tok.lower() in STOPWORDS:
+                continue
+            if _starts_sentence(text, m.start()):
+                continue
+            if _stem(tok) not in self.all_stems:
+                return False
+        return True
+
+
+def _tidy(text) -> str:
+    """Light cleaning for text written by a strong model: spacing, bullet marks and the first letter."""
+    s = re.sub(r"\s+", " ", str(text or "")).strip()
+    s = re.sub(r"^(?:(?:[\-\*•]|\[[ xX]?\])\s*)+", "", s)
+    return s[:1].upper() + s[1:] if s else ""
+
+
+def refine_model_notes(notes: dict, source: str, relaxed: bool = False, language: str = "auto") -> dict:
+    """Check what a model returned against the transcript and repair it with the rules.
 
     Bullets, actions and key points that say things the speaker did not say (words or numbers that are not in
     the source) are dropped; filler and empty remarks are removed; a generic title or heading is replaced by one
     the rules find; tasks the model missed are added from the rules. Raises StructureError when nothing is left.
+
+    With `relaxed` set (output of a strong model) the rewriting is trusted more: the model's own wording is kept
+    instead of being cleaned by the filler rules, fewer of the words have to come from the transcript, numbers
+    may also be written out in the transcript, and no tasks are added from the rules. Numbers and names must
+    still come from the transcript.
     """
+    src = _Source(source, language)
     prefixes = {w[:5] for w in _kw(source)}
     digits = set(re.findall(r"\d+", source))
 
     def supported(text: str, threshold: float = 0.5) -> bool:
+        if relaxed:
+            return src.numbers_ok(text, True) and src.names_ok(text) and src.support(text) >= min(threshold, 0.3)
         ws = _kw(text)
         if ws and sum(1 for w in ws if w[:5] in prefixes) / len(ws) < threshold:
             return False
         return all(d in digits or int(d) <= 12 for d in re.findall(r"\d+", text))
+
+    def label_ok(text: str) -> bool:
+        return not relaxed or (src.numbers_ok(text, True) and src.names_ok(text))
 
     rules: dict | None = None
 
@@ -1028,7 +1222,7 @@ def refine_model_notes(notes: dict, source: str) -> dict:
     for sec in notes["sections"]:
         bullets = []
         for b in sec["bullets"]:
-            c = clean_sentence(b)
+            c = _tidy(b) if relaxed else clean_sentence(b)
             if not c or is_empty_remark(c) or not supported(c) or any(_near_duplicate(c, x) for x in seen):
                 continue
             seen.append(c)
@@ -1036,53 +1230,65 @@ def refine_model_notes(notes: dict, source: str) -> dict:
         if not bullets:
             continue
         heading = sec["heading"].strip().rstrip(".:;").strip()
-        if not heading or heading.lower() in GENERIC_HEADINGS or len(heading.split()) > 7:
+        if not heading or heading.lower() in GENERIC_HEADINGS or len(heading.split()) > 7 or not label_ok(heading):
             heading = best_phrase(bullets) or short_phrase(heading, 5) or "Notes"
         sections.append({"heading": heading, "bullets": bullets})
     if not sections:
         raise StructureError("the model produced no usable bullets")
 
     title = _clean_title(notes.get("title"))
-    if not title or title.lower() in GENERIC_TITLES:
+    if not title or title.lower() in GENERIC_TITLES or not label_ok(title):
         title = fallback()["title"]
     summary = (notes.get("summary") or "").strip()
     if not summary or not supported(summary, 0.4):
         summary = fallback()["summary"]
-    actions = [a for a in notes.get("actions") or [] if supported(a)]
-    for a in extract_actions(_prepare_sentences(source)):  # a small model often leaves tasks out
-        if not any(_near_duplicate(a, x) for x in actions):
-            actions.append(a)
-    key_points = [k for k in notes.get("key_points") or [] if supported(k) and not is_empty_remark(k)]
+    elif relaxed:
+        summary = _tidy(summary)
+    if relaxed:
+        actions = [_tidy(a) for a in notes.get("actions") or [] if supported(str(a))]
+        key_points = [_tidy(k) for k in notes.get("key_points") or [] if supported(str(k)) and not is_empty_remark(str(k))]
+    else:
+        actions = [a for a in notes.get("actions") or [] if supported(a)]
+        if not actions:  # a small model often leaves the tasks out; when it lists some, its wording is kept
+            actions = extract_actions(_prepare_sentences(source))
+        key_points = [k for k in notes.get("key_points") or [] if supported(k) and not is_empty_remark(k)]
     return normalize_notes({"title": title, "summary": summary, "key_points": key_points, "sections": sections,
                             "actions": actions})
 
 
-def structure_ollama(
-    text: str, on_progress: Callable[[int, int], None] | None = None
+def _structure_pieces(
+    text: str,
+    limit: int,
+    chat: Callable[[str], dict],
+    head: Callable[[str], dict],
+    refine: Callable[[dict, str], dict],
+    on_progress: Callable[[int, int], None] | None = None,
 ) -> tuple[dict, int]:
-    """Structure with the local model. Returns (notes, number of pieces done by the fallback).
+    """Structure a transcript piece by piece with a model. Returns (notes, number of pieces done by the rules).
 
-    A piece the model cannot handle is structured by the rules instead of
-    throwing away the pieces that worked. After two failures in a row the model
-    is assumed to be overloaded and the remaining pieces use the rules.
+    A piece the model cannot handle is structured by the rules instead of throwing away the pieces that
+    worked. After two failures in a row the model is assumed to be unavailable and the remaining pieces use
+    the rules. `chat(piece)` returns the raw notes of one piece, `head(digest)` the title and summary of the
+    whole note, `refine(notes, piece)` checks and repairs one piece.
     """
-    pieces = split_pieces(text)
+    pieces = split_pieces(text, limit)
     if not pieces:
         raise StructureError("The transcript is empty.")
     results: list[dict] = []
     fallback_pieces = 0
     streak = 0
+    last_error = ""
     for i, piece in enumerate(pieces):
         if on_progress:
             on_progress(i, len(pieces))
         notes = None
         if streak < 2:
             try:
-                notes = refine_model_notes(
-                    normalize_notes(_ollama_chat(SYSTEM_PROMPT, f"Transcript:\n{piece}", example=True)), piece)
+                notes = refine(normalize_notes(chat(piece)), piece)
                 streak = 0
-            except StructureError:
+            except StructureError as exc:
                 streak += 1
+                last_error = str(exc)
         if notes is None:
             try:
                 notes = structure_rules(piece)
@@ -1093,7 +1299,7 @@ def structure_ollama(
     if on_progress:
         on_progress(len(pieces), len(pieces))
     if not results or fallback_pieces == len(pieces):
-        raise StructureError("the model produced no usable notes")
+        raise StructureError(last_error or "the model produced no usable notes")
     if len(results) == 1:
         return results[0], fallback_pieces
     sections: list[dict] = []
@@ -1111,9 +1317,9 @@ def structure_ollama(
         key_points = [key_points[i] for i in sorted(sorted(range(len(key_points)), key=lambda k: -imp[k])[:5])]
     digest = "\n".join(f"Part {i + 1}: {r['summary']}" for i, r in enumerate(results))
     try:
-        head = _ollama_chat(SUMMARY_PROMPT, digest)
-        title = _clean_title(head.get("title"))
-        summary = str(head.get("summary") or "").strip()
+        top = head(digest)
+        title = _clean_title(top.get("title"))
+        summary = str(top.get("summary") or "").strip()
     except StructureError:
         title, summary = "", ""
     if not title or title.lower() in GENERIC_TITLES or not summary:
@@ -1124,27 +1330,262 @@ def structure_ollama(
             "sections": sections[:30], "actions": actions}, fallback_pieces
 
 
+def ollama_system_prompt(language: str = "auto") -> str:
+    lang = languages.lenient(language)
+    if lang == "auto":
+        return SYSTEM_PROMPT
+    name = languages.LANGUAGES[lang]
+    return SYSTEM_PROMPT.replace("- Write in the language of the transcript.\n",
+                                 f"- The recording is in {name}. Write the notes in {name}. Do not translate.\n")
+
+
+def structure_ollama(
+    text: str, on_progress: Callable[[int, int], None] | None = None, language: str = "auto"
+) -> tuple[dict, int]:
+    """Structure with the local model. Returns (notes, number of pieces done by the fallback)."""
+    system = ollama_system_prompt(language)
+    example = ollama_example(text, language)
+    return _structure_pieces(
+        text,
+        MAX_PIECE_CHARS,
+        lambda piece: _ollama_chat(system, f"Transcript:\n{piece}", example=example or False),
+        lambda digest: _ollama_chat(SUMMARY_PROMPT, digest),
+        lambda notes, piece: refine_model_notes(notes, piece),
+        on_progress,
+    )
+
+
+# ------------------------------------------------------------------ groq
+
+GROQ_PREFERRED = ("llama-3.3-70b-versatile", "llama-3.1-70b-versatile", "llama3-70b-8192")
+_NOT_CHAT = ("whisper", "guard", "tts", "orpheus", "embed", "playai")
+GROQ_PIECE_CHARS = 12000  # about 3000 tokens of transcript per request
+
+_models_cache: dict = {"key": None, "at": 0.0, "ids": None, "resolved": None}
+
+
+def reset_groq_cache() -> None:
+    _models_cache.update(key=None, at=0.0, ids=None, resolved=None)
+
+
+def groq_enabled() -> bool:
+    return settings.use_groq_chat and bool(settings.groq_api_key)
+
+
+def groq_models() -> list[str] | None:
+    """Chat models that Groq offers to this key (GET /models), cached for ten minutes. None when it cannot be read."""
+    cache_key = (settings.groq_models_url, settings.groq_api_key)
+    if _models_cache["key"] == cache_key and _models_cache["ids"] is not None and time.time() - _models_cache["at"] < 600:
+        return _models_cache["ids"]
+    try:
+        r = httpx.get(settings.groq_models_url, headers={"Authorization": f"Bearer {settings.groq_api_key}"}, timeout=8.0)
+        r.raise_for_status()
+        ids = [m["id"] for m in r.json().get("data", []) if isinstance(m, dict) and m.get("id")]
+    except (httpx.HTTPError, ValueError, KeyError, TypeError, AttributeError):
+        return None
+    ids = [i for i in ids if not any(x in i.lower() for x in _NOT_CHAT)]
+    _models_cache.update(key=cache_key, at=time.time(), ids=ids, resolved=None)
+    return ids
+
+
+def resolve_groq_model() -> str:
+    """The configured chat model when Groq lists it, else the best 70B-class model that it does list."""
+    want = settings.groq_chat_model
+    ids = groq_models()
+    if ids is None or want in ids:  # when the list cannot be read, try the configured model anyway
+        model = want
+    else:
+        model = next((m for m in GROQ_PREFERRED if m in ids), None) or next(
+            (i for i in sorted(ids) if "70b" in i.lower() or "120b" in i.lower()), None)
+        if not model:
+            raise StructureError("Groq lists no suitable chat model for this key.")
+        log.warning("groq model %s is not available, using %s", want, model)
+    _models_cache["resolved"] = model
+    return model
+
+
+def groq_status() -> dict:
+    """Whether Groq is used for structuring and with which model (no network call)."""
+    model = _models_cache["resolved"] or settings.groq_chat_model
+    if not settings.use_groq_chat:
+        return {"enabled": False, "model": model, "reason": "disabled"}
+    if not settings.groq_api_key:
+        return {"enabled": False, "model": model, "reason": "no key"}
+    return {"enabled": True, "model": model, "reason": ""}
+
+
+GROQ_SYSTEM_PROMPT = (
+    "You write clean notes from the transcript of a spoken voice note. The notes will be shared with team members "
+    "or classmates who were not there, so they must be clear, well organised and complete on their own.\n"
+    "Rules:\n"
+    "- Rewrite the speech into proper written sentences. Remove fillers, stutters, repetitions and false starts. "
+    "Never copy the spoken wording word for word.\n"
+    "- Never invent facts, names, numbers or dates. Every name, number and date in the notes must come from the "
+    "transcript. Leave out anything that is unclear.\n"
+    "- {language_rule}\n"
+    "- Keep it concise: leave out greetings, small talk, asides and anything without content, and do not repeat a point.\n"
+    "- Use a neutral tone and plain statements. Do not address the speaker and do not describe the recording itself.\n"
+    "Return one JSON object with exactly these keys:\n"
+    "- \"title\": 2 to 8 words naming the topic. Not a sentence, no full stop.\n"
+    "- \"summary\": 2 to 4 sentences saying what the note is about and what was decided or concluded.\n"
+    "- \"key_points\": the 2 to 5 most important facts, decisions or deadlines, each a complete sentence. "
+    "An empty list when the note is short.\n"
+    "- \"sections\": a list of objects with \"heading\" and \"bullets\". Group the content by topic, in the order "
+    "spoken. A heading has 1 to 5 words and names its topic (never \"Notes\", \"Details\" or \"Introduction\"). "
+    "Each section has 2 to 7 bullets and every bullet is one complete, clean sentence. When the speaker describes "
+    "steps in order, keep that order.\n"
+    "- \"action_items\": the tasks that someone has to do, each a short instruction that starts with a verb, "
+    "with the person who owns it when a name was given and the deadline when one was given. An empty list when "
+    "there are none.\n"
+    "Answer with the JSON object only."
+)
+
+
+def groq_system_prompt(language: str = "auto") -> str:
+    lang = languages.lenient(language)
+    if lang == "auto":
+        rule = "Write the notes in the language of the recording. Do not translate."
+    else:
+        name = languages.LANGUAGES[lang]
+        rule = f"The recording is in {name}. Write all the notes in {name}. Do not translate."
+    return GROQ_SYSTEM_PROMPT.format(language_rule=rule)
+
+
+def groq_head_prompt(language: str = "auto") -> str:
+    lang = languages.lenient(language)
+    same = "the same language" if lang == "auto" else languages.LANGUAGES[lang]
+    return (
+        "You receive the summaries of consecutive parts of one long voice note. "
+        f"Write in {same}, do not translate, and never add facts, names, numbers or dates. "
+        "Return a JSON object with a short title of 2 to 8 words (not a sentence), "
+        "a summary of three or four sentences covering the whole note, an empty key_points list, "
+        "an empty sections list and an empty action_items list."
+    )
+
+
+def _retry_after(resp: httpx.Response, attempt: int) -> float:
+    try:
+        return min(float(resp.headers.get("retry-after", "")), 20.0)
+    except ValueError:
+        return 2.0 * (attempt + 1)
+
+
+def _action_text(item) -> str:
+    if isinstance(item, dict):
+        task = str(item.get("task") or item.get("action") or item.get("text") or item.get("instruction") or "").strip()
+        owner = str(item.get("owner") or item.get("assignee") or "").strip()
+        return f"{owner}: {task}" if owner and task and owner.lower() not in task.lower() else task
+    return str(item or "").strip()
+
+
+def _groq_chat(model: str, system: str, user: str) -> dict:
+    """One chat completion that returns a JSON object. Raises StructureError with a message safe to show."""
+    key = settings.groq_api_key
+    if not key:
+        raise StructureError("Groq is not configured.")
+    payload = {
+        "model": model,
+        "temperature": 0.2,
+        "max_tokens": 4096,
+        "response_format": {"type": "json_object"},
+        "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+    }
+    timeout = httpx.Timeout(float(settings.groq_chat_timeout), connect=10.0)
+    resp = None
+    for attempt in range(3):
+        try:
+            resp = httpx.post(settings.groq_chat_url, headers={"Authorization": f"Bearer {key}"}, json=payload,
+                              timeout=timeout)
+        except httpx.TimeoutException:
+            raise StructureError("Groq did not answer in time.")
+        except httpx.HTTPError:
+            raise StructureError("Groq could not be reached.")
+        if resp.status_code in (429, 500, 502, 503, 504) and attempt < 2:
+            time.sleep(_retry_after(resp, attempt))
+            continue
+        break
+    if resp.status_code in (401, 403):
+        raise StructureError("Groq rejected the API key.")
+    if resp.status_code != 200:
+        raise StructureError(f"Groq returned an error ({resp.status_code}).")
+    try:
+        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+    except (KeyError, IndexError, ValueError, TypeError):
+        raise StructureError("Groq sent an answer that could not be read.")
+    if not isinstance(data, dict):
+        raise StructureError("Groq sent an answer that could not be read.")
+    items = data["action_items"] if "action_items" in data else data.get("actions")
+    data["actions"] = [t for t in (_action_text(a) for a in items or []) if t] if isinstance(items, list) else []
+    return data
+
+
+def structure_groq(
+    text: str, model: str, language: str = "auto", on_progress: Callable[[int, int], None] | None = None
+) -> tuple[dict, int]:
+    """Structure with a Groq chat model. Returns (notes, number of pieces done by the fallback)."""
+    system = groq_system_prompt(language)
+    lang = languages.lenient(language)
+    label = "Detect the language of the recording." if lang == "auto" else f"Language: {languages.LANGUAGES[lang]}."
+    return _structure_pieces(
+        text,
+        GROQ_PIECE_CHARS,
+        lambda piece: _groq_chat(model, system, f"{label}\n\nTranscript:\n{piece}"),
+        lambda digest: _groq_chat(model, groq_head_prompt(language), digest),
+        lambda notes, piece: refine_model_notes(notes, piece, relaxed=True, language=lang),
+        on_progress,
+    )
+
+
 # ------------------------------------------------------------------ entry
 
 def structure_transcript(
-    text: str, on_progress: Callable[[int, int], None] | None = None
+    text: str,
+    on_progress: Callable[[int, int], None] | None = None,
+    language: str = "auto",
+    report: dict | None = None,
 ) -> tuple[dict, str]:
-    """Return (notes, engine). The engine is 'ollama:<model>' or 'rule-based'.
+    """Return (notes, engine). The engine is 'groq:<model>', 'ollama:<model>' or 'rule-based'.
 
-    When some pieces of a long note fell back to the rules, the engine reads
-    'ollama:<model> (partly rule-based)'.
+    Groq is tried first, then the local Ollama model, then the rules. When some pieces of a long note fell
+    back to the rules, the engine reads '<engine> (partly rule-based)'. If `report` is given, the reason why a
+    better engine was not used is stored in report["fallback_reason"].
     """
     text = (text or "").strip()
     if not text:
         raise StructureError("The recording contains no recognisable speech.")
-    status = ollama_status()
-    if status["available"]:
+    language = languages.lenient(language)
+    report = report if report is not None else {}
+    reasons: list[str] = []
+
+    if groq_enabled():
         try:
-            notes, partial = structure_ollama(text, on_progress)
+            model = resolve_groq_model()
+            notes, partial = structure_groq(text, model, language, on_progress)
+            engine = f"groq:{model}" + (" (partly rule-based)" if partial else "")
+            log.info("structuring engine used: %s", engine)
+            return notes, engine
+        except StructureError as exc:
+            msg = str(exc) or "Groq could not be used."
+            reasons.append(msg if msg.startswith("Groq") else f"The Groq answer could not be used ({msg}).")
+            log.warning("groq structuring failed (%s), falling back", exc)
+
+    plan = _ollama_plan()
+    if plan["engine"].startswith("ollama:"):
+        try:
+            notes, partial = structure_ollama(text, on_progress, language)
             engine = f"ollama:{settings.ollama_model}" + (" (partly rule-based)" if partial else "")
+            if reasons:
+                report["fallback_reason"] = reasons[0] + " The local model was used instead."
+            log.info("structuring engine used: %s", engine)
             return _with_extras(notes, text), engine
-        except StructureError:
-            pass
+        except StructureError as exc:
+            reasons.append("The local model did not give usable notes.")
+            log.warning("ollama structuring failed (%s), using the rules", exc)
+    else:
+        reasons.append(plan["reason"])
+    if reasons:
+        report["fallback_reason"] = " ".join(r for r in reasons if r) + " The built-in rules were used."
+    log.info("structuring engine used: rule-based")
     return structure_rules(text), "rule-based"
 
 

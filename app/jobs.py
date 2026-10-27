@@ -1,5 +1,6 @@
 """Note jobs: state, persistence on disk and the processing pipeline."""
 import json
+import logging
 import re
 import shutil
 import threading
@@ -7,12 +8,14 @@ import time
 import uuid
 from pathlib import Path
 
-from . import audio, structure, transcribe
+from . import audio, languages, structure, transcribe
 from .config import settings
 
 STAGES = ["queued", "converting", "transcribing", "structuring", "done"]
 KEEP_FAILED_UPLOADS_DAYS = 7
 MAX_TITLE = 100
+
+log = logging.getLogger("voice_notes.jobs")
 
 _lock = threading.RLock()
 _jobs: dict[str, dict] = {}
@@ -72,10 +75,11 @@ def load_all() -> None:
             _jobs[job["id"]] = job
 
 
-def new_job(filename: str) -> dict:
+def new_job(filename: str, language: str = "auto") -> dict:
     job = {
         "id": uuid.uuid4().hex[:12],
         "filename": filename[:200],
+        "language": languages.lenient(language),
         "created": time.time(),
         "status": "queued",
         "stage": "queued",
@@ -88,6 +92,7 @@ def new_job(filename: str) -> dict:
         "transcript": None,
         "notes": None,
         "engine": None,
+        "engine_detail": None,
         "plan": None,
     }
     with _lock:
@@ -278,6 +283,7 @@ def run(job_id: str) -> None:
         keep_upload = False
         try:
             _update(job_id, status="processing", plan=structure.engine_plan())
+            language = languages.lenient(job.get("language"))
             text = job.get("transcript") or ""
             if not text.strip():
                 if not src.exists():
@@ -293,7 +299,7 @@ def run(job_id: str) -> None:
                     _update(job_id, progress=0.1 + 0.6 * done / total, detail=label)
 
                 try:
-                    text = transcribe.transcribe_chunks(chunks, on_transcribe, overlaps=overlaps)
+                    text = transcribe.transcribe_chunks(chunks, on_transcribe, overlaps=overlaps, language=language)
                 except transcribe.TranscriptionError:
                     keep_upload = True
                     raise
@@ -302,23 +308,28 @@ def run(job_id: str) -> None:
                 _update(job_id, transcript=text)
 
             plan = structure.engine_plan()
-            using_model = plan["engine"].startswith("ollama:")
+            kind = plan["engine"].split(":", 1)[0]
+            using_model = kind in ("groq", "ollama")
+            who = ("Groq model " if kind == "groq" else "the local model ") + plan["model"]
             _stage(job_id, "structuring", plan=plan, progress=0.72,
-                   detail=("Waiting for the local model " + plan["model"]) if using_model
+                   detail=(f"Waiting for {who}") if using_model
                    else "Structuring with the built-in rules")
 
             def on_structure(done: int, total: int) -> None:
                 if not using_model:
                     return
-                label = f"Local model {plan['model']}: part {min(done + 1, total)} of {total}" if done < total else "Structuring the notes"
+                label = f"{who[0].upper()}{who[1:]}: part {min(done + 1, total)} of {total}" if done < total else "Structuring the notes"
                 _update(job_id, progress=0.72 + 0.26 * done / total, detail=label)
 
-            notes, engine = structure.structure_transcript(text, on_structure)
+            report: dict = {}
+            notes, engine = structure.structure_transcript(text, on_structure, language=language, report=report)
+            log.info("note %s: structured with %s (language %s)", job_id, engine, language)
             custom = (get(job_id) or {}).get("custom_title")
             if custom:
                 notes = {**notes, "title": custom}
-            _update(job_id, notes=notes, engine=engine, status="done", stage="done",
-                    progress=1.0, detail="Done", retryable=False, restructure=False, rebuild_error=None)
+            _update(job_id, notes=notes, engine=engine, engine_detail=report.get("fallback_reason") or None,
+                    status="done", stage="done", progress=1.0, detail="Done", retryable=False,
+                    restructure=False, rebuild_error=None)
         except (audio.AudioError, structure.StructureError) as exc:
             _fail(job_id, str(exc), False)
         except transcribe.TranscriptionError as exc:
