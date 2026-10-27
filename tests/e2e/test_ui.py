@@ -39,7 +39,7 @@ def free_port() -> int:
 @pytest.fixture(scope="module")
 def stack(tmp_path_factory):
     data = tmp_path_factory.mktemp("data")
-    fake = fakes.start_fake(delay=1.0)
+    fake = fakes.start_fake(delay=2.0)  # slower than the page's 1.5 s polling, so each step is seen
     port = free_port()
     env = dict(
         os.environ,
@@ -111,7 +111,7 @@ def test_empty_state_and_layout(page):
     assert page.locator("h1").first.inner_text().startswith("Turn a voice note")
     assert page.locator("#side-empty").is_visible()
     assert page.locator("#go").is_disabled() or not page.locator("#picked").is_visible()
-    assert "local model qwen2.5:1.5b" in page.locator("#engine-line").inner_text()
+    sync_api.expect(page.locator("#engine-line")).to_contain_text("local model qwen2.5:1.5b")  # filled in after /api/health
     shot(page, "home.png")
 
 
@@ -201,8 +201,8 @@ def test_full_flow_upload_to_exports(page, audio_file, tmp_path):
 
     # The note is in the recent list and a reload keeps it
     page.reload()
-    assert page.locator("#result-title").inner_text() == "Website launch planning"
-    assert page.locator(".figure[data-kind=mindmap]").count() == 1
+    sync_api.expect(page.locator("#result-title")).to_have_text("Website launch planning")  # filled in after the fetch
+    sync_api.expect(page.locator(".figure[data-kind=mindmap]")).to_have_count(1)
     page.click("#back")
     page.wait_for_selector("#side-list:not([hidden])")
     assert "Website launch planning" in page.locator("#side-list").inner_text()
