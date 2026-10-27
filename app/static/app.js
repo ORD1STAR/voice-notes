@@ -13,6 +13,9 @@
   var currentJob = null;
   var selected = null;
   var uploading = false;
+  var searchQuery = "";
+  var listRequest = 0;
+  var elapsed = { base: 0, at: 0, label: "" };
 
   var STEP_ORDER = ["upload", "converting", "transcribing", "structuring"];
   var AUDIO_EXT = /\.(mp3|m4a|wav|ogg|oga|opus|flac|aac|webm|mp4|m4v|mov|mkv|amr|3gp|wma|aiff?)$/i;
@@ -42,6 +45,12 @@
     return r + " s";
   }
 
+  function fmtClock(sec) {
+    sec = Math.max(0, Math.floor(sec));
+    var h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? h + ":" + (m < 10 ? "0" : "") : "") + m + ":" + (s < 10 ? "0" : "") + s;
+  }
+
   function fmtDate(ts) {
     return new Date(ts * 1000).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
   }
@@ -60,10 +69,11 @@
     return e;
   }
 
-  function showError(message, removable) {
+  function showError(message, removable, retryable) {
     stopPolling();
     $("error-message").textContent = message;
     $("error-remove").hidden = !removable;
+    $("error-again").hidden = !retryable;
     show("error");
   }
 
@@ -71,14 +81,37 @@
     return fetch(path, opts).then(function (res) {
       if (res.ok) return res;
       return res.json().catch(function () { return {}; }).then(function (body) {
-        var err = new Error(body.error || "The request failed (" + res.status + ").");
+        var err = new Error(body.error || (body.detail && typeof body.detail === "string" ? body.detail : "The request failed (" + res.status + ")."));
         err.status = res.status;
         throw err;
       });
     });
   }
 
-  /* ---------- health and engine line ---------- */
+  /* ---------- health, structuring method and engine line ---------- */
+
+  function methodText(plan) {
+    if (plan && plan.engine && plan.engine.indexOf("ollama:") === 0) {
+      return {
+        title: "Notes are written by the local model " + plan.model,
+        text: "On a small server each part of a long recording takes a few minutes. You will see every part as it finishes."
+      };
+    }
+    return {
+      title: "Notes use the built-in rules",
+      text: ((plan && plan.reason) ? plan.reason + " " : "") +
+        "You still get a title, summary, sections, diagrams and action items, but the wording stays close to what was said. " +
+        "Install Ollama and a model (see the README) for rewritten, more polished notes."
+    };
+  }
+
+  function showMethod(prefix, plan) {
+    if (!plan) return;
+    var m = methodText(plan);
+    $(prefix + "-title").textContent = m.title;
+    $(prefix + "-text").textContent = m.text;
+    $(prefix).hidden = false;
+  }
 
   function loadHealth() {
     return api("/api/health").then(function (r) { return r.json(); }).then(function (h) {
@@ -88,6 +121,7 @@
       var o = h.ollama || {};
       var structuring = o.available ? "local model " + o.model : "rule-based structuring";
       $("engine-line").textContent = "Transcription: Groq Whisper. Structuring: " + structuring + ".";
+      showMethod("method", h.structuring);
 
       var problems = [];
       if (!h.groq_key) problems.push("GROQ_API_KEY is not set on the server, so recordings cannot be transcribed yet.");
@@ -170,19 +204,14 @@
   }
 
   function setupRecorder() {
-    var api = !!(window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-    $("rec-start").hidden = !(api && window.isSecureContext);
+    var supported = !!(window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    $("rec-start").hidden = !(supported && window.isSecureContext);
     $("rec-hint").hidden = !(window.MediaRecorder && !window.isSecureContext);
   }
 
   function showRecordingUi(on) {
     $("drop-idle").hidden = on;
     $("drop-rec").hidden = !on;
-  }
-
-  function fmtClock(ms) {
-    var s = Math.floor(ms / 1000);
-    return Math.floor(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
   }
 
   function endRecording() {
@@ -221,7 +250,7 @@
       mr.start(1000);
       rec.started = Date.now();
       $("rec-time").textContent = "0:00";
-      rec.timer = setInterval(function () { $("rec-time").textContent = fmtClock(Date.now() - rec.started); }, 500);
+      rec.timer = setInterval(function () { $("rec-time").textContent = fmtClock((Date.now() - rec.started) / 1000); }, 500);
       showRecordingUi(true);
       $("rec-stop").focus();
     }).catch(function (e) {
@@ -258,6 +287,9 @@
     updateGo();
     stopPolling();
     $("progress-file").textContent = file.name + " (" + fmtSize(file.size) + ")";
+    $("progress-elapsed").textContent = "";
+    elapsed.at = 0;
+    showMethod("progress-method", health && health.structuring);
     setSteps("upload", "Uploading");
     setBar(0, false);
     $("progress-detail").textContent = "Uploading 0%";
@@ -282,13 +314,13 @@
         setSelected(null);
         location.hash = "#/note/" + body.id;
       } else {
-        showError(body.error || "The upload failed (" + xhr.status + ").", false);
+        showError(body.error || "The upload failed (" + xhr.status + ").", false, false);
       }
       updateGo();
     };
     xhr.onerror = function () {
       uploading = false;
-      showError("The upload was interrupted. Check your connection and try again.", false);
+      showError("The upload was interrupted. Check your connection and try again.", false, false);
       updateGo();
     };
     xhr.send(form);
@@ -318,12 +350,36 @@
     });
   }
 
+  var STAGE_LABEL = { converting: "Preparing the audio", transcribing: "Transcribing", structuring: "Structuring" };
+
+  function renderElapsed() {
+    var box = $("progress-elapsed");
+    if (!elapsed.at || views.progress.hidden) { return; }
+    box.textContent = elapsed.label + ": " + fmtClock(elapsed.base + (Date.now() - elapsed.at) / 1000);
+  }
+  setInterval(renderElapsed, 1000);
+
   function renderProgress(job) {
     $("progress-file").textContent = job.filename;
-    var stage = job.stage === "queued" ? "converting" : job.stage;
-    setSteps(stage, job.stage === "queued" ? "Queued" : "In progress");
-    setBar(job.progress * 100, job.stage === "queued");
-    $("progress-detail").textContent = job.detail || "Working";
+    var queued = job.stage === "queued";
+    var stage = queued ? "converting" : job.stage;
+    setSteps(stage, queued ? "Queued" : "In progress");
+    setBar(job.progress * 100, queued);
+    var detail = job.detail || "Working";
+    if (queued && job.ahead > 0) {
+      detail = "Waiting for " + job.ahead + (job.ahead === 1 ? " other note" : " other notes") + " to finish first";
+    }
+    $("progress-detail").textContent = detail;
+    if (queued) {
+      elapsed.at = 0;
+      $("progress-elapsed").textContent = "";
+    } else {
+      elapsed.base = job.stage_elapsed || 0;
+      elapsed.at = Date.now();
+      elapsed.label = (STAGE_LABEL[job.stage] || "This step") + ", time so far";
+      renderElapsed();
+    }
+    showMethod("progress-method", job.plan);
     if (views.progress.hidden) show("progress");
   }
 
@@ -379,12 +435,68 @@
     $("glance").hidden = !(list && list.length);
   }
 
+  /* ---------- action items ---------- */
+
+  function storedChecks(id) {
+    try { return JSON.parse(localStorage.getItem("vn-actions:" + id) || "[]"); } catch (x) { return []; }
+  }
+
+  function saveChecks(id, list) {
+    try { localStorage.setItem("vn-actions:" + id, JSON.stringify(list)); } catch (x) { /* storage may be blocked */ }
+  }
+
+  function renderActions(job) {
+    var list = (job.notes && job.notes.actions) || [];
+    var host = $("actions-list");
+    host.textContent = "";
+    $("actions-block").hidden = list.length === 0;
+    if (!list.length) return;
+    var done = storedChecks(job.id);
+    function count() {
+      var n = host.querySelectorAll("input:checked").length;
+      $("actions-count").textContent = n + " of " + list.length + " done";
+    }
+    list.forEach(function (text, i) {
+      var li = el("li");
+      var label = el("label");
+      var box = el("input");
+      box.type = "checkbox";
+      box.checked = done.indexOf(text) >= 0;
+      box.addEventListener("change", function () {
+        var now = [];
+        host.querySelectorAll("input").forEach(function (b, j) { if (b.checked) now.push(list[j]); });
+        saveChecks(job.id, now);
+        count();
+      });
+      label.appendChild(box);
+      label.appendChild(el("span", text));
+      li.appendChild(label);
+      host.appendChild(li);
+    });
+    count();
+  }
+
   /* ---------- result view ---------- */
+
+  function engineNote(job) {
+    var note = $("engine-note");
+    var plan = job.plan || {};
+    var text = "";
+    if (job.engine === "rule-based") {
+      text = "These notes were built with the built-in rules. " + (plan.reason ? plan.reason + " " : "") +
+        "Sentences are kept close to the wording of the recording. Install Ollama and a model for rewritten notes.";
+    } else if (job.engine && job.engine.indexOf("partly") > 0) {
+      text = "The local model could not handle every part of this recording, so some sections were built with the built-in rules.";
+    }
+    note.textContent = text;
+    note.hidden = !text;
+  }
 
   function renderResult(job) {
     currentJob = job;
     var n = job.notes;
     $("result-title").textContent = n.title;
+    closeRename(false);
     var engine = job.engine && job.engine.indexOf("ollama:") === 0
       ? "Structured with " + job.engine.slice(7)
       : "Structured with rules";
@@ -395,6 +507,7 @@
     });
     $("summary").textContent = n.summary;
     $("summary-block").hidden = !n.summary;
+    renderActions(job);
     renderFigures(job.visuals);
 
     var host = $("sections");
@@ -410,6 +523,7 @@
       sec.appendChild(inner);
       host.appendChild(sec);
     });
+    engineNote(job);
 
     var tr = $("transcript");
     tr.textContent = "";
@@ -437,6 +551,11 @@
   function notesAsMarkdown(job) {
     var out = ["# " + job.notes.title, ""];
     if (job.notes.summary) out.push("## Summary", "", job.notes.summary, "");
+    if (job.notes.actions && job.notes.actions.length) {
+      out.push("## Action items", "");
+      job.notes.actions.forEach(function (a) { out.push("- [ ] " + a); });
+      out.push("");
+    }
     job.notes.sections.forEach(function (s) {
       out.push("## " + s.heading, "");
       s.bullets.forEach(function (b) { out.push("- " + b); });
@@ -461,6 +580,51 @@
       try { document.execCommand("copy") ? done() : fail(); } catch (x) { fail(); }
       document.body.removeChild(ta);
     }
+  });
+
+  /* ---------- renaming ---------- */
+
+  function closeRename(focusButton) {
+    $("rename-form").hidden = true;
+    $("title-row").hidden = false;
+    if (focusButton) $("rename").focus();
+  }
+
+  $("rename").addEventListener("click", function () {
+    if (!currentJob) return;
+    $("title-row").hidden = true;
+    $("rename-form").hidden = false;
+    var input = $("rename-input");
+    input.value = currentJob.notes.title;
+    input.focus();
+    input.select();
+  });
+  $("rename-cancel").addEventListener("click", function () { closeRename(true); });
+  $("rename-input").addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); closeRename(true); }
+  });
+  $("rename-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    if (!currentId) return;
+    var title = $("rename-input").value.replace(/\s+/g, " ").trim();
+    if (!title) { $("rename-input").focus(); return; }
+    if (title === currentJob.notes.title) { closeRename(true); return; }
+    $("rename-save").disabled = true;
+    api("/api/notes/" + currentId, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: title })
+    }).then(function (r) { return r.json(); }).then(function (job) {
+      currentJob.notes.title = job.notes.title;
+      $("result-title").textContent = job.notes.title;
+      document.title = job.notes.title + " - Voice Notes";
+      closeRename(true);
+      $("copy-status").textContent = "Renamed.";
+      loadRecent();
+    }).catch(function (err) {
+      $("copy-status").textContent = err.message;
+      closeRename(true);
+    }).then(function () { $("rename-save").disabled = false; });
   });
 
   /* ---------- deleting ---------- */
@@ -493,6 +657,28 @@
     removeCurrent(function (m) { $("error-message").textContent = m; });
   });
 
+  /* ---------- trying a failed note again ---------- */
+
+  $("error-again").addEventListener("click", function () {
+    if (!currentId) return;
+    var id = currentId;
+    $("error-again").disabled = true;
+    api("/api/notes/" + id + "/retry", { method: "POST" }).then(function () {
+      pollFailures = 0;
+      $("progress-file").textContent = "";
+      elapsed.at = 0;
+      $("progress-elapsed").textContent = "";
+      setSteps("converting", "Queued");
+      setBar(0, true);
+      $("progress-detail").textContent = "Starting again";
+      show("progress");
+      poll(id);
+    }).catch(function (err) {
+      $("error-message").textContent = err.message;
+      $("error-again").hidden = true;
+    }).then(function () { $("error-again").disabled = false; });
+  });
+
   /* tabs */
   var tabs = [$("tab-notes"), $("tab-transcript")];
   function selectTab(name, focus) {
@@ -516,10 +702,28 @@
     });
   });
 
-  /* ---------- note lists (sidebar and start page) ---------- */
+  /* ---------- note lists (sidebar and start page) and search ---------- */
+
+  function searchTerms() {
+    return searchQuery.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+  }
+
+  function highlight(text, terms) {
+    var frag = document.createDocumentFragment();
+    if (!terms.length) { frag.appendChild(document.createTextNode(text)); return frag; }
+    var rx = new RegExp("(" + terms.map(function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }).join("|") + ")", "gi");
+    text.split(rx).forEach(function (part, i) {
+      if (!part) return;
+      if (i % 2 === 1) frag.appendChild(el("mark", part)); else frag.appendChild(document.createTextNode(part));
+    });
+    return frag;
+  }
 
   function fillList(list, empty, items) {
+    var terms = searchTerms();
     list.textContent = "";
+    empty.textContent = terms.length ? "No notes match \"" + searchQuery.trim() + "\"." :
+      (list.id === "side-list" ? "Nothing here yet." : "No notes yet. Notes you create will be listed here.");
     empty.hidden = items.length > 0;
     list.hidden = items.length === 0;
     items.forEach(function (it) {
@@ -528,26 +732,55 @@
       a.href = "#/note/" + it.id;
       if (it.id === currentId) a.setAttribute("aria-current", "page");
       var title = it.status === "done" ? (it.title || it.filename) : it.filename;
-      a.appendChild(el("span", title, "row-title"));
+      var t = el("span", null, "row-title");
+      t.appendChild(highlight(title, terms));
+      a.appendChild(t);
       var state, bad = false;
       if (it.status === "done") state = fmtShortDate(it.created);
       else if (it.status === "error") { state = "Failed"; bad = true; }
       else state = "Working";
       a.appendChild(el("span", state, "row-meta" + (bad ? " bad" : "")));
-      var sub = [it.status === "done" && it.title ? it.filename : "", fmtDuration(it.duration)].filter(Boolean).join("  /  ");
-      if (sub) a.appendChild(el("span", sub, "row-sub"));
+      if (terms.length && it.snippet) {
+        var sn = el("span", null, "row-snippet");
+        sn.appendChild(highlight(it.snippet, terms));
+        a.appendChild(sn);
+      } else {
+        var sub = [it.status === "done" && it.title ? it.filename : "", fmtDuration(it.duration)].filter(Boolean).join("  /  ");
+        if (sub) a.appendChild(el("span", sub, "row-sub"));
+      }
       li.appendChild(a);
       list.appendChild(li);
     });
   }
 
   function loadRecent() {
-    return api("/api/notes").then(function (r) { return r.json(); }).then(function (items) {
+    var ticket = ++listRequest;
+    var url = "/api/notes" + (searchQuery.trim() ? "?q=" + encodeURIComponent(searchQuery.trim()) : "");
+    return api(url).then(function (r) { return r.json(); }).then(function (items) {
+      if (ticket !== listRequest) return; // a newer search is already on its way
       items = items.slice(0, 60);
       fillList($("recent-list"), $("recent-empty"), items);
       fillList($("side-list"), $("side-empty"), items);
+      $("search-status").textContent = searchQuery.trim()
+        ? (items.length === 1 ? "1 note found" : items.length + " notes found") : "";
     }).catch(function () { /* the lists are optional */ });
   }
+
+  var searchTimer = null;
+  ["search", "search-recent"].forEach(function (id) {
+    $(id).addEventListener("input", function (e) {
+      searchQuery = e.target.value;
+      ["search", "search-recent"].forEach(function (other) { if ($(other) !== e.target) $(other).value = searchQuery; });
+      clearTimeout(searchTimer);
+      searchTimer = setTimeout(loadRecent, 200);
+    });
+    $(id).addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && $(id).value) {
+        $(id).value = "";
+        $(id).dispatchEvent(new Event("input"));
+      }
+    });
+  });
 
   /* ---------- polling and routing ---------- */
 
@@ -562,7 +795,7 @@
       if (job.status === "done" && job.notes) {
         renderResult(job);
       } else if (job.status === "error") {
-        showError(job.error || "Something went wrong while processing this file.", true);
+        showError(job.error || "Something went wrong while processing this file.", true, !!job.retryable);
         loadRecent();
       } else {
         renderProgress(job);
@@ -570,9 +803,9 @@
       }
     }).catch(function (err) {
       if (id !== currentId) return;
-      if (err.status === 404) { showError("This note does not exist anymore.", false); return; }
+      if (err.status === 404) { showError("This note does not exist anymore.", false, false); return; }
       pollFailures += 1;
-      if (pollFailures > 6) { showError("The server stopped answering. Reload the page to check again.", false); return; }
+      if (pollFailures > 6) { showError("The server stopped answering. Reload the page to check again.", false, false); return; }
       pollTimer = setTimeout(function () { poll(id); }, 3000);
     });
   }
@@ -586,6 +819,8 @@
     if (m) {
       currentId = m[1];
       pollFailures = 0;
+      elapsed.at = 0;
+      $("progress-elapsed").textContent = "";
       if (!health) loadHealth();
       poll(currentId);
     } else {

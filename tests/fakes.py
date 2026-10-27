@@ -57,6 +57,7 @@ RICH_NOTES = {
             "Meet every Monday morning.",
             "Keep the meeting short and focused on blockers."]},
     ],
+    "actions": ["Call the venue about the launch date", "Send the final copy to marketing", "Book the review meeting"],
 }
 
 
@@ -84,6 +85,12 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/audio/transcriptions"):
             if self.headers.get("Authorization", "") != "Bearer " + self.server.expected_key:
                 return self._send(401, {"error": "bad key"})
+            with self.server.lock:
+                failing = self.server.fail_next > 0
+                if failing:
+                    self.server.fail_next -= 1
+            if failing:  # a one-off failure, used to test "Try again"
+                return self._send(400, {"error": "temporary problem"})
             time.sleep(self.server.delay)
             with self.server.lock:
                 i = self.server.count
@@ -102,6 +109,7 @@ def start_fake(delay: float = 0.0, model: str = "qwen2.5:1.5b", key: str = "test
     server.model = model
     server.expected_key = key
     server.count = 0
+    server.fail_next = 0
     server.lock = threading.Lock()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
