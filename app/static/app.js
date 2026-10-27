@@ -100,7 +100,7 @@
     return {
       title: "Notes use the built-in rules",
       text: ((plan && plan.reason) ? plan.reason + " " : "") +
-        "You still get a title, summary, sections, diagrams and action items, but the wording stays close to what was said. " +
+        "You still get a title, summary, key points, sections, diagrams and action items, but the wording stays close to what was said. " +
         "Install Ollama and a model (see the README) for rewritten, more polished notes."
     };
   }
@@ -435,6 +435,15 @@
     $("glance").hidden = !(list && list.length);
   }
 
+  /* ---------- key points ---------- */
+
+  function renderKeyPoints(list) {
+    var host = $("keypoints-list");
+    host.textContent = "";
+    (list || []).forEach(function (text) { host.appendChild(el("li", text)); });
+    $("keypoints-block").hidden = !(list && list.length);
+  }
+
   /* ---------- action items ---------- */
 
   function storedChecks(id) {
@@ -507,6 +516,7 @@
     });
     $("summary").textContent = n.summary;
     $("summary-block").hidden = !n.summary;
+    renderKeyPoints(n.key_points);
     renderActions(job);
     renderFigures(job.visuals);
 
@@ -531,7 +541,7 @@
       ? job.transcript_paragraphs : (job.transcript ? [job.transcript] : []);
     paras.forEach(function (p) { tr.appendChild(el("p", p)); });
 
-    $("copy-status").textContent = "";
+    $("copy-status").textContent = job.rebuild_error || "";
     selectTab("notes", false);
     updateExportLinks();
     show("result");
@@ -551,6 +561,11 @@
   function notesAsMarkdown(job) {
     var out = ["# " + job.notes.title, ""];
     if (job.notes.summary) out.push("## Summary", "", job.notes.summary, "");
+    if (job.notes.key_points && job.notes.key_points.length) {
+      out.push("## Key points", "");
+      job.notes.key_points.forEach(function (k) { out.push("- " + k); });
+      out.push("");
+    }
     if (job.notes.actions && job.notes.actions.length) {
       out.push("## Action items", "");
       job.notes.actions.forEach(function (a) { out.push("- [ ] " + a); });
@@ -629,11 +644,30 @@
 
   /* ---------- deleting ---------- */
 
-  function confirmDelete() {
+  var DELETE_ASK = {
+    title: "Delete this note?",
+    text: "The notes and the transcript will be removed from this server. This cannot be undone.",
+    no: "Keep it", yes: "Delete", danger: true
+  };
+  var REBUILD_ASK = {
+    title: "Rebuild these notes?",
+    text: "The notes are written again from the transcript with the method available now. The title you chose is kept. " +
+      "Ticked action items may need ticking again.",
+    no: "Cancel", yes: "Rebuild", danger: false
+  };
+
+  function ask(opts) {
     var d = $("confirm");
     if (typeof d.showModal !== "function") {
-      return Promise.resolve(window.confirm("Delete this note and its transcript? This cannot be undone."));
+      return Promise.resolve(window.confirm(opts.title + " " + opts.text));
     }
+    $("confirm-title").textContent = opts.title;
+    $("confirm-text").textContent = opts.text;
+    $("confirm-cancel").textContent = opts.no;
+    var yes = $("confirm-delete");
+    yes.textContent = opts.yes;
+    yes.classList.toggle("danger-solid", opts.danger);
+    yes.classList.toggle("confirm-neutral", !opts.danger);
     return new Promise(function (resolve) {
       d.returnValue = "";
       var onClose = function () { d.removeEventListener("close", onClose); resolve(d.returnValue === "delete"); };
@@ -641,6 +675,8 @@
       d.showModal();
     });
   }
+
+  function confirmDelete() { return ask(DELETE_ASK); }
 
   function removeCurrent(onError) {
     if (!currentId) return;
@@ -655,6 +691,30 @@
   });
   $("error-remove").addEventListener("click", function () {
     removeCurrent(function (m) { $("error-message").textContent = m; });
+  });
+
+  /* ---------- rebuilding the notes from the transcript ---------- */
+
+  $("rebuild").addEventListener("click", function () {
+    if (!currentId) return;
+    var id = currentId;
+    ask(REBUILD_ASK).then(function (yes) {
+      if (!yes) { $("rebuild").focus(); return null; }
+      $("rebuild").disabled = true;
+      return api("/api/notes/" + id + "/restructure", { method: "POST" }).then(function () {
+        pollFailures = 0;
+        $("progress-file").textContent = currentJob ? currentJob.filename : "";
+        elapsed.at = 0;
+        $("progress-elapsed").textContent = "";
+        setSteps("structuring", "Queued");
+        setBar(70, true);
+        $("progress-detail").textContent = "Rebuilding the notes";
+        show("progress");
+        poll(id);
+      });
+    }).catch(function (err) {
+      $("copy-status").textContent = err.message;
+    }).then(function () { $("rebuild").disabled = false; });
   });
 
   /* ---------- trying a failed note again ---------- */

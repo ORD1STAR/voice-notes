@@ -6,7 +6,7 @@ from pathlib import Path
 from fpdf import FPDF
 
 from . import visuals
-from .structure import paragraphs
+from .structure import ensure_key_points, paragraphs
 
 FONT_DIRS = [
     Path(__file__).resolve().parent / "fonts",
@@ -47,6 +47,8 @@ def to_markdown(job: dict, include_transcript: bool = False) -> str:
         lines += [f"*{meta}*", ""]
     if notes.get("summary"):
         lines += ["## Summary", "", notes["summary"], ""]
+    if notes.get("key_points"):
+        lines += ["## Key points", ""] + [f"- {k}" for k in notes["key_points"]] + [""]
     if notes.get("actions"):
         lines += ["## Action items", ""] + [f"- [ ] {a}" for a in notes["actions"]] + [""]
     for sec in notes["sections"]:
@@ -69,6 +71,8 @@ def to_text(job: dict, include_transcript: bool = False) -> str:
     lines.append("")
     if notes.get("summary"):
         lines += ["SUMMARY", "", notes["summary"], ""]
+    if notes.get("key_points"):
+        lines += ["KEY POINTS", ""] + [f"- {k}" for k in notes["key_points"]] + [""]
     if notes.get("actions"):
         lines += ["ACTION ITEMS", ""] + [f"[ ] {a}" for a in notes["actions"]] + [""]
     for sec in notes["sections"]:
@@ -273,6 +277,28 @@ def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
         pdf.multi_cell(width - 2 * pad - 1, 6, t(notes["summary"]), align="L", new_x="LMARGIN", new_y="NEXT")
         pdf.set_y(y + box_h + 9)
 
+    # Key points: the few things a reader must not miss
+    if notes.get("key_points"):
+        indent_k = 6
+        pdf.set_font(serif, size=11.5)
+        first_h = pdf.multi_cell(width - indent_k, 6.2, t(notes["key_points"][0]), align="L", dry_run=True, output="HEIGHT")
+        if pdf.will_page_break(first_h + 14):
+            pdf.add_page()
+        label("Key points")
+        for k in notes["key_points"]:
+            pdf.set_font(serif, size=11.5)
+            h = pdf.multi_cell(width - indent_k, 6.2, t(k), align="L", dry_run=True, output="HEIGHT")
+            if pdf.will_page_break(h):
+                pdf.add_page()
+            y = pdf.get_y()
+            pdf.set_fill_color(*ACCENT)
+            pdf.rect(left + 0.4, y + 2.2, 1.9, 1.9, style="F")
+            pdf.set_text_color(*INK)
+            pdf.set_xy(left + indent_k, y)
+            pdf.multi_cell(width - indent_k, 6.2, t(k), align="L", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1.6)
+        pdf.ln(7)
+
     # Action items with empty check boxes
     if notes.get("actions"):
         if pdf.will_page_break(30):
@@ -369,6 +395,8 @@ def render(job: dict, fmt: str, include_transcript: bool = False) -> tuple[bytes
     """Return (content, mime type)."""
     if fmt not in FORMATS:
         raise ValueError(f"unknown format: {fmt}")
+    if job.get("notes"):
+        job = {**job, "notes": ensure_key_points(job["notes"])}  # older notes get key points from their bullets
     if fmt == "md":
         return to_markdown(job, include_transcript).encode("utf-8"), FORMATS[fmt][0]
     if fmt == "txt":

@@ -371,3 +371,67 @@ def test_a_waiting_note_already_knows_how_it_will_be_structured(client):
 def test_progress_text_names_the_builtin_rules(client, make_audio, fake_groq):
     job = wait_done(client, upload(client, make_audio(3)).json()["id"])
     assert job["plan"]["engine"] == "rule-based" and job["plan"]["reason"]
+
+
+# ------------------------------------------------ key points and rebuilding
+
+def test_older_notes_get_key_points_in_the_api_and_exports(client):
+    from transcripts import MEETING
+
+    from app import jobs, structure
+
+    rules = structure.structure_rules(MEETING)
+    bullets = [b for s in rules["sections"] for b in s["bullets"]]
+    nid = done_note("Old meeting", bullets, transcript=MEETING)
+    body = client.get(f"/api/notes/{nid}").json()
+    assert body["notes"]["key_points"]
+    assert all(k in bullets for k in body["notes"]["key_points"])
+    assert "key_points" not in jobs.get(nid)["notes"]  # nothing is rewritten on disk
+    assert "## Key points" in client.get(f"/api/notes/{nid}/export?format=md").text
+
+
+def test_rebuild_writes_the_notes_again_and_keeps_a_chosen_title(client):
+    nid = done_note("Old title", ["An old point."], transcript=SAMPLE_TEXT)
+    assert client.patch(f"/api/notes/{nid}", json={"title": "My own title"}).status_code == 200
+    assert client.post(f"/api/notes/{nid}/restructure").status_code == 202
+    job = wait_done(client, nid)
+    assert job["status"] == "done" and job["rebuild_error"] is None
+    assert job["notes"]["title"] == "My own title"
+    bullets = [b for s in job["notes"]["sections"] for b in s["bullets"]]
+    assert any("landing page" in b for b in bullets) and "An old point." not in bullets
+    assert job["engine"] == "rule-based" and "key_points" in job["notes"]
+
+
+def test_a_failed_rebuild_keeps_the_earlier_notes(client, monkeypatch):
+    from app import structure
+
+    def boom(text, on_progress=None):
+        raise structure.StructureError("The model fell over.")
+
+    nid = done_note("Fine as it is", ["A kept point."], transcript=SAMPLE_TEXT)
+    monkeypatch.setattr(structure, "structure_transcript", boom)
+    assert client.post(f"/api/notes/{nid}/restructure").status_code == 202
+    job = wait_done(client, nid)
+    assert job["status"] == "done"
+    assert job["notes"]["title"] == "Fine as it is" and job["notes"]["sections"][0]["bullets"] == ["A kept point."]
+    assert "could not be rebuilt" in job["rebuild_error"] and "The model fell over." in job["rebuild_error"]
+
+
+def test_rebuild_is_refused_when_it_cannot_work(client):
+    from app import jobs
+
+    assert client.post("/api/notes/deadbeef/restructure").status_code == 404
+    pending = jobs.new_job("x.wav")
+    assert client.post(f"/api/notes/{pending['id']}/restructure").status_code == 409
+    no_transcript = done_note("T", ["b"], transcript="")
+    assert client.post(f"/api/notes/{no_transcript}/restructure").status_code == 409
+
+
+def test_a_rebuild_interrupted_by_a_restart_keeps_the_notes():
+    from app import jobs
+
+    nid = done_note("Safe", ["A point."], transcript=SAMPLE_TEXT)
+    jobs._update(nid, status="processing", stage="structuring", restructure=True)
+    jobs.load_all()
+    job = jobs.get(nid)
+    assert job["status"] == "done" and job["notes"]["title"] == "Safe" and "restarted" in job["rebuild_error"]

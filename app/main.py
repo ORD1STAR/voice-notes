@@ -59,6 +59,7 @@ def _public(job: dict) -> dict:
     out["ahead"] = jobs.queue_ahead(job["id"]) if job.get("status") in ("queued", "processing") else 0
     out["stage_elapsed"] = max(0, round(time.time() - job.get("stage_started", time.time())))
     if job.get("status") == "done" and job.get("notes"):
+        out["notes"] = structure.ensure_key_points(job["notes"])  # notes saved before key points existed get them here
         out["visuals"] = visuals.build_visuals(job["notes"])
         out["transcript_paragraphs"] = structure.paragraphs(job.get("transcript") or "")
     else:
@@ -148,6 +149,15 @@ def retry_note(job_id: str):
         raise HTTPException(404, "This note does not exist.")
     if not jobs.retry(job_id):
         raise HTTPException(409, "This note cannot be tried again. Upload the recording once more.")
+    return {"id": job_id}
+
+
+@app.post("/api/notes/{job_id}/restructure", status_code=202)
+def restructure_note(job_id: str):
+    if not jobs.get(job_id):
+        raise HTTPException(404, "This note does not exist.")
+    if not jobs.restructure(job_id):
+        raise HTTPException(409, "These notes cannot be rebuilt: the note is not finished or has no transcript.")
     return {"id": job_id}
 
 

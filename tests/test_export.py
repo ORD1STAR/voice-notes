@@ -172,3 +172,39 @@ def test_pdf_with_actions_is_valid_and_longer():
     with_actions = export.to_pdf(action_job())
     assert with_actions.startswith(b"%PDF-") and with_actions.rstrip().endswith(b"%%EOF")
     assert len(with_actions) > len(export.to_pdf(JOB))
+
+
+# -------------------------------------------------------------- key points
+
+def key_job():
+    return {**JOB, "notes": {**JOB["notes"], "key_points": ["The landing page is due on Friday.", "The ad budget stays the same."],
+                             "actions": ["Call Anna about the delivery"]}}
+
+
+def test_key_points_sit_between_the_summary_and_the_action_items():
+    md = export.to_markdown(key_job())
+    assert "## Key points\n\n- The landing page is due on Friday.\n- The ad budget stays the same." in md
+    assert md.index("## Summary") < md.index("## Key points") < md.index("## Action items") < md.index("## Website")
+    txt = export.to_text(key_job())
+    assert "KEY POINTS\n\n- The landing page is due on Friday." in txt
+    assert txt.index("SUMMARY") < txt.index("KEY POINTS") < txt.index("ACTION ITEMS")
+    assert "Key points" not in export.to_markdown(JOB)  # none stored, none shown
+
+
+def test_pdf_with_key_points_is_valid_and_longer():
+    with_points = export.to_pdf(key_job())
+    assert with_points.startswith(b"%PDF-") and with_points.rstrip().endswith(b"%%EOF")
+    assert len(with_points) > len(export.to_pdf({**JOB, "notes": {**JOB["notes"], "actions": ["Call Anna about the delivery"]}}))
+
+
+def test_older_notes_get_key_points_when_exported():
+    from transcripts import MEETING
+
+    from app import structure
+
+    rules = structure.structure_rules(MEETING)
+    old = {"title": rules["title"], "summary": rules["summary"], "sections": rules["sections"]}  # saved without key_points
+    job = {**JOB, "notes": old}
+    md, _ = export.render(job, "md")
+    assert b"## Key points" in md
+    assert "key_points" not in job["notes"]  # the stored note is not touched

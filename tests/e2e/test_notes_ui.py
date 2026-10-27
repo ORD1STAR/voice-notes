@@ -305,3 +305,80 @@ def test_a_bad_file_offers_no_retry(chromium, rules_stack, tmp_path):
     assert not page.locator("#error-again").is_visible()
     assert page.locator("#error-retry").is_visible()
     ctx.close()
+
+
+# ------------------------------------------------- key points and rebuilding
+
+def test_key_points_are_shown_exported_and_copied(chromium, rich_stack, sample):
+    ctx, page, problems = open_note(chromium, rich_stack, sample, DESKTOP)
+    block = page.locator("#keypoints-block")
+    assert block.is_visible()
+    items = page.locator("#keypoints-list li")
+    assert items.count() == 2
+    assert items.first.inner_text() == "The ad budget is 5000 euros for the quarter."
+    # between the summary and the action items
+    y = lambda sel: page.eval_on_selector(sel, "e => e.getBoundingClientRect().top")  # noqa: E731
+    assert y("#summary-block") < y("#keypoints-block") < y("#actions-block")
+    with page.expect_download() as dl:
+        page.click("#exp-md")
+    with open(dl.value.path(), encoding="utf-8") as fh:
+        assert "## Key points\n\n- The ad budget is 5000 euros for the quarter." in fh.read()
+    ctx.grant_permissions(["clipboard-read", "clipboard-write"])
+    page.click("#copy")
+    page.locator("#copy-status", has_text="copied").wait_for()
+    assert "## Key points" in page.evaluate("navigator.clipboard.readText()")
+    assert problems == [], problems
+    ctx.close()
+
+
+def test_the_key_points_block_is_only_shown_when_there_are_key_points(chromium, rules_stack, sample):
+    base, _ = rules_stack
+    ctx = chromium.new_context(viewport=DESKTOP)
+    page = ctx.new_page()
+    note = make_note(base, sample)
+    page.goto(f"{base}/#/note/{note}")
+    page.wait_for_selector("#view-result:not([hidden])")
+    assert page.locator("#keypoints-block").is_visible() == (page.locator("#keypoints-list li").count() > 0)
+    ctx.close()
+
+
+def test_rebuild_asks_first_keeps_the_title_and_shows_the_notes_again(chromium, rich_stack, sample):
+    ctx, page, problems = open_note(chromium, rich_stack, sample, DESKTOP)
+    page.click("#rename")
+    page.fill("#rename-input", "Chosen title")
+    page.keyboard.press("Enter")
+    page.locator("#result-title", has_text="Chosen title").wait_for()
+
+    page.click("#rebuild")
+    assert "Rebuild these notes" in page.locator("#confirm-title").inner_text()
+    assert page.locator("#confirm-delete").inner_text() == "Rebuild"
+    page.click("#confirm-cancel")  # nothing happens
+    assert page.locator("#view-result").is_visible()
+
+    with page.expect_request(lambda r: r.url.endswith("/restructure") and r.method == "POST"):
+        page.click("#rebuild")
+        page.click("#confirm-delete")
+    page.wait_for_selector("#view-result:not([hidden])", timeout=40000)
+    page.locator("#result-title", has_text="Chosen title").wait_for()
+    assert page.locator("#keypoints-list li").count() == 2
+    # the same dialog still works for deleting, with the delete wording
+    page.click("#delete")
+    assert "Delete this note" in page.locator("#confirm-title").inner_text()
+    assert page.locator("#confirm-delete").inner_text() == "Delete"
+    page.click("#confirm-cancel")
+    assert problems == [], problems
+    ctx.close()
+
+
+@pytest.mark.parametrize("scheme", ["light", "dark"])
+def test_key_points_and_toolbar_are_readable_on_a_phone(chromium, rich_stack, sample, scheme):
+    from test_design import CONTRAST_JS, SMALL_TARGETS_JS
+
+    ctx, page, problems = open_note(chromium, rich_stack, sample, {"width": 360, "height": 740}, scheme=scheme, mobile=True)
+    assert page.locator("#keypoints-block").is_visible() and page.locator("#rebuild").is_visible()
+    assert page.evaluate(CONTRAST_JS) == []
+    assert page.evaluate(SMALL_TARGETS_JS) == []
+    assert page.evaluate("document.documentElement.scrollWidth <= window.innerWidth")
+    assert page.eval_on_selector("#keypoints-list li", "e => parseFloat(getComputedStyle(e).fontSize)") >= 18
+    assert problems == [], problems
+    ctx.close()

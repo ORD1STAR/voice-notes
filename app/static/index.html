@@ -45,7 +45,7 @@
         <section id="view-start" aria-labelledby="start-title">
           <p class="eyebrow">New note</p>
           <h1 id="start-title" tabindex="-1">Turn a voice note into clean notes</h1>
-          <p class="lede">Upload or record up to <span id="max-mb">200</span> MB of audio. You get a transcript, a summary, sections with bullets and diagrams, ready to export.</p>
+          <p class="lede">Upload or record up to <span id="max-mb">200</span> MB of audio. You get a transcript, a summary, key points, action items, sections with bullets and diagrams, ready to export.</p>
 
           <div id="setup-notice" class="notice" role="status" hidden></div>
 
@@ -102,7 +102,7 @@
 
           <ol class="how" aria-label="How it works">
             <li><span class="how-n">1</span><span><strong>Transcribe</strong> The audio is cut into parts and written out.</span></li>
-            <li><span class="how-n">2</span><span><strong>Structure</strong> A title, summary, sections and diagrams are built from the text.</span></li>
+            <li><span class="how-n">2</span><span><strong>Structure</strong> A title, summary, key points, sections and diagrams are built from the text.</span></li>
             <li><span class="how-n">3</span><span><strong>Export</strong> Take it as PDF, Markdown or plain text.</span></li>
           </ol>
 
@@ -176,6 +176,7 @@
             </div>
             <label class="check"><input type="checkbox" id="with-transcript"> With transcript</label>
             <div class="toolbar-end">
+              <button type="button" class="btn quiet" id="rebuild" title="Write the notes again from the transcript">Rebuild notes</button>
               <button type="button" class="btn quiet" id="copy">Copy notes</button>
               <button type="button" class="btn quiet danger" id="delete">Delete</button>
             </div>
@@ -192,6 +193,10 @@
               <h2 class="eyebrow">Summary</h2>
               <p id="summary"></p>
             </div>
+            <section class="keypoints" id="keypoints-block" aria-labelledby="keypoints-title" hidden>
+              <h2 class="eyebrow" id="keypoints-title">Key points</h2>
+              <ol class="key-list" id="keypoints-list"></ol>
+            </section>
             <section class="actions-card" id="actions-block" aria-labelledby="actions-title" hidden>
               <div class="glance-head">
                 <h2 class="eyebrow" id="actions-title">Action items</h2>
@@ -225,7 +230,7 @@
   <dialog id="confirm" aria-labelledby="confirm-title">
     <form method="dialog">
       <h2 id="confirm-title">Delete this note?</h2>
-      <p>The notes and the transcript will be removed from this server. This cannot be undone.</p>
+      <p id="confirm-text">The notes and the transcript will be removed from this server. This cannot be undone.</p>
       <div class="actions end">
         <button type="submit" value="cancel" class="btn" id="confirm-cancel">Keep it</button>
         <button type="submit" value="delete" class="btn danger-solid" id="confirm-delete">Delete</button>

@@ -57,8 +57,19 @@ RICH_NOTES = {
             "Meet every Monday morning.",
             "Keep the meeting short and focused on blockers."]},
     ],
+    "key_points": ["The ad budget is 5000 euros for the quarter.", "Reach 30% more signups than last quarter."],
     "actions": ["Call the venue about the launch date", "Send the final copy to marketing", "Book the review meeting"],
 }
+
+
+def transcript_for(notes: dict) -> str:
+    """A transcript that says everything the notes say, as a real model would have read it."""
+    sentences = [notes["title"] + ".", notes["summary"]]
+    for sec in notes["sections"]:
+        sentences += sec["bullets"]
+    sentences += notes.get("key_points", [])
+    sentences += [f"We need to {a[:1].lower()}{a[1:]}." for a in notes.get("actions", [])]
+    return " ".join(sentences)
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -95,7 +106,7 @@ class _Handler(BaseHTTPRequestHandler):
             with self.server.lock:
                 i = self.server.count
                 self.server.count += 1
-            return self._send(200, {"text": PARTS[i % len(PARTS)]})
+            return self._send(200, {"text": self.server.parts[i % len(self.server.parts)]})
         if self.path == "/api/chat":
             time.sleep(self.server.delay)
             return self._send(200, {"message": {"content": json.dumps(self.server.notes)}})
@@ -105,6 +116,7 @@ class _Handler(BaseHTTPRequestHandler):
 def start_fake(delay: float = 0.0, model: str = "qwen2.5:1.5b", key: str = "test-key-not-real", notes: dict | None = None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     server.notes = notes or NOTES
+    server.parts = [transcript_for(notes)] if notes else PARTS
     server.delay = delay
     server.model = model
     server.expected_key = key
