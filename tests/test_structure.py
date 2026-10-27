@@ -1,4 +1,5 @@
 import json
+from collections import Counter
 
 import httpx
 import pytest
@@ -236,3 +237,88 @@ def test_short_notes_keep_every_sentence():
     notes = structure.structure_rules("Buy milk. Call Anna. Okay.")
     bullets = [b for s in notes["sections"] for b in s["bullets"]]
     assert "Buy milk." in bullets and "Call Anna." in bullets
+
+
+# ---------------------------------------------- action items, sections, status
+
+def test_extract_actions_finds_tasks_and_keeps_the_task_clause():
+    sents = [
+        "We went to the park yesterday.",
+        "I need to call Anna about the compost delivery.",
+        "Also, my sister said she can help on Saturday, so we should plan the clearing for that day.",
+        "Remember to buy seeds because they sell out fast.",
+        "Should we paint the shed?",
+        "It will rain on Friday.",
+        "If it rains, we should move the event indoors.",
+    ]
+    got = structure.extract_actions(sents)
+    assert got == [
+        "I need to call Anna about the compost delivery",
+        "We should plan the clearing for that day",
+        "Remember to buy seeds",
+        "If it rains, we should move the event indoors",
+    ][:len(got)]
+    assert len(got) == 4  # questions and plain statements are not tasks
+
+
+def test_extract_actions_french_and_limit():
+    assert structure.extract_actions(["Il faut appeler le plombier demain matin."]) == ["Il faut appeler le plombier demain matin"]
+    names = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima".split()
+    many = [f"We need to call {n} about the {names[(i + 3) % 12]} order." for i, n in enumerate(names)]
+    assert len(structure.extract_actions(many)) == structure.MAX_ACTIONS
+
+
+def test_rule_based_notes_carry_action_items():
+    notes = structure.structure_rules(GARDEN + " Remember to order the seeds before Friday.")
+    assert any("order the seeds" in a for a in notes["actions"])
+    assert notes["actions"] == [a for a in notes["actions"] if a]
+    assert structure.normalize_notes({"title": "t", "sections": [{"heading": "h", "bullets": ["b"]}],
+                                      "actions": ["- [ ] Call Anna", "call anna", ""]})["actions"] == ["Call Anna"]
+
+
+def test_sections_follow_a_change_of_topic():
+    garden = ["The tomatoes need more sun in the garden.", "The garden soil is dry and the tomatoes are small.",
+              "We water the tomatoes in the garden every morning.", "The garden beds need compost for the tomatoes.",
+              "Garden compost makes the soil rich for tomatoes."]
+    budget = ["The quarterly budget shows a gap in revenue.", "Revenue targets for the quarterly budget are missed.",
+              "The budget review covers revenue and costs.", "Costs in the quarterly budget rose with revenue falling.",
+              "Finance will present the budget revenue report."]
+    groups = structure.topic_groups(garden + budget)
+    assert [len(g) for g in groups] == [5, 5]
+    assert groups[0] == garden
+    # Short notes stay in one section.
+    assert len(structure.topic_groups(garden)) == 1
+    # Long notes are cut into sections of 3 to 8 sentences.
+    many = [f"Sentence {i} talks about topic{i // 4} things and topic{i // 4} details." for i in range(40)]
+    assert all(3 <= len(g) <= 8 for g in structure.topic_groups(many))
+
+
+def test_heading_prefers_a_repeated_word_pair():
+    group = ["We build a compost bin from pallets.", "The compost bin needs a lid.", "Pallets are free from the shop."]
+    assert structure._heading(group, Counter(), set()) == "Compost bin"
+
+
+def test_engine_plan_explains_why_the_fallback_is_used(monkeypatch):
+    monkeypatch.setenv("USE_OLLAMA", "0")
+    plan = structure.engine_plan()
+    assert plan["engine"] == "rule-based" and "switched off" in plan["reason"]
+    monkeypatch.setenv("USE_OLLAMA", "1")
+    monkeypatch.setenv("OLLAMA_HOST_URL", "http://127.0.0.1:1")
+    plan = structure.engine_plan()
+    assert plan["engine"] == "rule-based" and "not running" in plan["reason"]
+    fake_ollama(monkeypatch, {})
+    plan = structure.engine_plan()
+    assert plan["engine"] == "ollama:tiny:1b" and plan["reason"] == ""
+    monkeypatch.setenv("OLLAMA_MODEL", "other:7b")
+    assert "not installed" in structure.engine_plan()["reason"]
+
+
+def test_model_notes_get_actions_from_the_rules_when_the_model_gives_none(monkeypatch):
+    payload = {"title": "Plan", "summary": "S.", "sections": [{"heading": "H", "bullets": ["b"]}], "actions": []}
+    fake_ollama(monkeypatch, payload)
+    notes, engine = structure.structure_transcript("We talked a lot. I need to call Anna about the delivery tomorrow.")
+    assert engine.startswith("ollama:")
+    assert notes["actions"] == ["I need to call Anna about the delivery tomorrow"]
+    payload["actions"] = ["Book the van"]
+    notes, _ = structure.structure_transcript("We talked a lot. I need to call Anna about the delivery tomorrow.")
+    assert notes["actions"] == ["Book the van"]

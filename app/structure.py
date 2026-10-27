@@ -8,6 +8,7 @@ Notes have this shape:
     {"title": str, "summary": str, "sections": [{"heading": str, "bullets": [str]}]}
 """
 import json
+import math
 import re
 from collections import Counter
 from typing import Callable
@@ -120,10 +121,13 @@ def _clip(text: str, n: int) -> str:
     return cut + "..."
 
 
-def short_phrase(text: str, max_words: int = 8) -> str:
-    """A short label taken from the start of a sentence, without a dangling word at the end."""
+def short_phrase(text: str, max_words: int = 8, split: bool = True) -> str:
+    """A short label taken from the start of a sentence, without a dangling word at the end.
+
+    With split=False the text is not cut at the first comma or colon, only at max_words.
+    """
     s = re.sub(r"\s+", " ", text).strip()
-    m = re.search(r"[,;:]\s|\s[-/]\s", s)
+    m = re.search(r"[,;:]\s|\s[-/]\s", s) if split else None
     if m and len(s[:m.start()].split()) >= 3:
         s = s[:m.start()]
     words = s.split()
@@ -155,7 +159,13 @@ def normalize_notes(raw: dict) -> dict:
             sections.append({"heading": heading or "Notes", "bullets": bullets[:12]})
     if not sections:
         raise StructureError("no sections")
-    return {"title": _clip(title, 100) or "Untitled note", "summary": summary, "sections": sections[:30]}
+    actions: list[str] = []
+    for a in raw.get("actions") or []:
+        a = re.sub(r"^(?:(?:[\-\*•]|\[[ xX]?\])\s*)+", "", str(a).strip())
+        if a and a.lower() not in {x.lower() for x in actions}:
+            actions.append(_clip(a, 160))
+    return {"title": _clip(title, 100) or "Untitled note", "summary": summary, "sections": sections[:30],
+            "actions": actions[:10]}
 
 
 # ------------------------------------------------------------- rule based
@@ -202,6 +212,106 @@ def _topic_title(sentence: str) -> str:
     return phrase if len(phrase.split()) >= 1 and len(phrase) >= 4 else ""
 
 
+_ACTION = re.compile(
+    r"\b(?:(?:need|needs|have|has|got) to|must|should|remember to|don'?t forget|do not forget|make sure|let'?s|"
+    r"(?:i|we)(?:'ll| will)|(?:i'm|we're|i am|we are) going to|to-?do|follow up|"
+    r"il faut|je dois|on doit|n'oublie|n'oubliez|pense à|faut que|hay que|tengo que|debemos|no olvides)\b",
+    re.IGNORECASE,
+)
+_ACTION_LEAD = re.compile(r"^(?:and|so|also|oh|then|now|but|okay|ok|well)\b[\s,]*", re.IGNORECASE)
+_ACTION_CUT = re.compile(r"[,;]\s|\s(?:because|which|since|so that|but|otherwise)\s", re.IGNORECASE)
+MAX_ACTIONS = 8
+
+
+def extract_actions(sentences: list[str]) -> list[str]:
+    """Tasks the speaker set for themselves: sentences with "need to", "should", "remember to" and similar."""
+    out: list[str] = []
+    for s in sentences:
+        s = s.strip()
+        if s.endswith("?") or not _ACTION.search(s):
+            continue
+        s = _ACTION_LEAD.sub("", s)
+        m = _ACTION.search(s)
+        if not re.match(r"if\b", s, re.IGNORECASE):
+            seams = list(re.finditer(r"[,;]\s", s[:m.start()]))
+            if seams:  # "Anna can help on Saturday, so we should plan the clearing": keep the clause with the task
+                s = _ACTION_LEAD.sub("", s[seams[-1].end():])
+                m = _ACTION.search(s)
+        cut = _ACTION_CUT.search(s, m.end())
+        if cut:
+            s = s[:cut.start()]
+        phrase = short_phrase(s, 16, split=False)
+        if len(phrase.split()) < 3:
+            continue
+        if any(_near_duplicate(phrase, o) for o in out):
+            continue
+        out.append(phrase)
+        if len(out) == MAX_ACTIONS:
+            break
+    return out
+
+
+def _stem(word: str) -> str:
+    return word[:-1] if len(word) > 4 and word.endswith("s") else word
+
+
+def _similarity(left: list[str], right: list[str]) -> float:
+    a = Counter(_stem(w) for s in left for w in _words(s))
+    b = Counter(_stem(w) for s in right for w in _words(s))
+    dot = sum(v * b[k] for k, v in a.items() if k in b)
+    den = math.sqrt(sum(v * v for v in a.values())) * math.sqrt(sum(v * v for v in b.values()))
+    return dot / den if den else 0.0
+
+
+def topic_groups(sentences: list[str], target: int = 5, low: int = 3, high: int = 8) -> list[list[str]]:
+    """Cut a list of sentences into sections where the vocabulary changes the most.
+
+    Short notes stay in one section. Longer ones are cut between `low` and `high` sentences from the
+    start of the section, at the gap where the words before and after have the least in common.
+    """
+    n = len(sentences)
+    if n <= 6:
+        return [sentences]
+
+    def gap(b: int) -> tuple[float, int]:
+        return round(_similarity(sentences[max(0, b - 2):b], sentences[b:b + 2]), 3), 0
+
+    groups, start = [], 0
+    while n - start > high:
+        best = min(range(start + low, min(start + high, n - low) + 1),
+                   key=lambda b: (gap(b)[0], abs(b - start - target)))
+        groups.append(sentences[start:best])
+        start = best
+    rest = sentences[start:]
+    if len(rest) >= 2 * low:
+        best = min(range(start + low, n - low + 1), key=lambda b: (gap(b)[0], abs(b - start - target)))
+        if gap(best)[0] < 0.05:
+            groups.append(sentences[start:best])
+            start = best
+            rest = sentences[start:]
+    groups.append(rest)
+    return groups
+
+
+def _heading(group: list[str], freq: Counter, used: set[str]) -> str:
+    """A short heading: the most repeated word pair in the section, or its two strongest words."""
+    pairs: Counter = Counter()
+    for sent in group:
+        toks = re.findall(r"[^\W\d_]{3,}", sent.lower())
+        for a, b in zip(toks, toks[1:]):
+            if a not in STOPWORDS and b not in STOPWORDS:
+                pairs[(a, b)] += 1
+    for (a, b), count in pairs.most_common():
+        if count >= 2 and a not in used and b not in used:
+            used.update((a, b))
+            return f"{a.capitalize()} {b}"
+    local = Counter(w for sent in group for w in _words(sent))
+    ranked = [w for w, _ in sorted(local.items(), key=lambda kv: (-kv[1] * (1 + freq[kv[0]] / 10), kv[0]))]
+    picked = [w for w in ranked if w not in used][:2] or ranked[:2]
+    used.update(picked)
+    return " and ".join(w.capitalize() for w in picked) or "Notes"
+
+
 def structure_rules(text: str) -> dict:
     sentences = _prepare_sentences(text)
     if not sentences:
@@ -223,27 +333,17 @@ def structure_rules(text: str) -> dict:
     top = sorted(range(len(sentences)), key=lambda i: score(sentences[i]), reverse=True)[:n_summary]
     summary = " ".join(_clip(sentences[i], 240) for i in sorted(top))
 
-    # Group sentences into sections of about five sentences.
-    size = 5 if len(sentences) > 6 else max(len(sentences), 1)
-    groups = [sentences[i:i + size] for i in range(0, len(sentences), size)]
-    if len(groups) > 1 and len(groups[-1]) == 1:
-        groups[-2].extend(groups.pop())
-
     used: set[str] = set()
     sections = []
-    for g in groups:
-        local = Counter(w for s in g for w in _words(s))
-        ranked = [w for w, _ in sorted(local.items(), key=lambda kv: (-kv[1] * (1 + freq[kv[0]] / 10), kv[0]))]
-        picked = [w for w in ranked if w not in used][:2] or ranked[:2]
-        used.update(picked)
-        heading = " and ".join(w.capitalize() for w in picked) or "Notes"
-        sections.append({"heading": heading, "bullets": [_clip(s, 260) for s in g]})
+    for g in topic_groups(sentences):
+        sections.append({"heading": _heading(g, freq, used), "bullets": [_clip(x, 260) for x in g]})
 
     if not title:
         title = short_phrase(sentences[0], 8)
         if len(title) < 8 and len(sentences) > 1:
             title = short_phrase(sentences[0] + " " + sentences[1], 8)
-    return {"title": _clip(title, 70) or "Untitled note", "summary": summary, "sections": sections}
+    return {"title": _clip(title, 70) or "Untitled note", "summary": summary, "sections": sections,
+            "actions": extract_actions(sentences)}
 
 
 # ---------------------------------------------------------------- ollama
@@ -264,6 +364,7 @@ NOTES_SCHEMA = {
                 "required": ["heading", "bullets"],
             },
         },
+        "actions": {"type": "array", "items": {"type": "string"}},
     },
     "required": ["title", "summary", "sections"],
 }
@@ -276,7 +377,9 @@ SYSTEM_PROMPT = (
     "and sections. Each section has a short heading and 2 to 6 bullets. "
     "Bullets are concise sentences. Remove filler words and repetitions. "
     "When the speaker describes steps in an order, keep the steps in that order and start each "
-    "bullet with its step. Keep every number, percentage and amount exactly as spoken."
+    "bullet with its step. Keep every number, percentage and amount exactly as spoken. "
+    "Put the tasks the speaker says they must do in actions, as short imperative phrases "
+    "(an empty list when there are none)."
 )
 
 SUMMARY_PROMPT = (
@@ -299,6 +402,20 @@ def ollama_status() -> dict:
     want = settings.ollama_model
     ok = any(n == want or n.split(":")[0] == want or (":" not in want and n.startswith(want + ":")) for n in names)
     return {"enabled": True, "available": ok, "model": want, "reason": "" if ok else "model not installed"}
+
+
+def engine_plan() -> dict:
+    """Which engine will structure the next note, and when it is the fallback, why."""
+    st = ollama_status()
+    model = st["model"]
+    if st["available"]:
+        return {"engine": f"ollama:{model}", "model": model, "reason": ""}
+    reasons = {
+        "disabled": "The local model is switched off on this server (USE_OLLAMA=0).",
+        "not reachable": "The local model server (Ollama) is not running on this server.",
+        "model not installed": f"The model {model} is not installed in Ollama on this server.",
+    }
+    return {"engine": "rule-based", "model": model, "reason": reasons.get(st["reason"], "The local model is not available.")}
 
 
 def _ollama_chat(system: str, user: str) -> dict:
@@ -358,6 +475,7 @@ def structure_ollama(
     if len(results) == 1:
         return results[0], fallback_pieces
     sections = [s for r in results for s in r["sections"]]
+    actions = normalize_notes({"sections": sections, "actions": [a for r in results for a in r.get("actions", [])]})["actions"]
     digest = "\n".join(f"Part {i + 1}: {r['summary']}" for i, r in enumerate(results))
     try:
         head = _ollama_chat(SUMMARY_PROMPT, digest)
@@ -369,7 +487,7 @@ def structure_ollama(
         fallback = structure_rules(text)
         title = title or fallback["title"]
         summary = summary or fallback["summary"]
-    return {"title": _clip(title, 100), "summary": summary, "sections": sections[:30]}, fallback_pieces
+    return {"title": _clip(title, 100), "summary": summary, "sections": sections[:30], "actions": actions}, fallback_pieces
 
 
 # ------------------------------------------------------------------ entry
@@ -390,7 +508,14 @@ def structure_transcript(
         try:
             notes, partial = structure_ollama(text, on_progress)
             engine = f"ollama:{settings.ollama_model}" + (" (partly rule-based)" if partial else "")
-            return notes, engine
+            return _with_actions(notes, text), engine
         except StructureError:
             pass
     return structure_rules(text), "rule-based"
+
+
+def _with_actions(notes: dict, text: str) -> dict:
+    """A small model often leaves out the tasks; the rules find them in the transcript."""
+    if not notes.get("actions"):
+        notes["actions"] = extract_actions(_prepare_sentences(text))
+    return notes
