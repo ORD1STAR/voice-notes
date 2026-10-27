@@ -10,16 +10,19 @@
   var pollTimer = null;
   var pollFailures = 0;
   var currentId = null;
+  var currentJob = null;
   var selected = null;
   var uploading = false;
 
   var STEP_ORDER = ["upload", "converting", "transcribing", "structuring"];
   var AUDIO_EXT = /\.(mp3|m4a|wav|ogg|oga|opus|flac|aac|webm|mp4|m4v|mov|mkv|amr|3gp|wma|aiff?)$/i;
+  var SVG_NS = "http://www.w3.org/2000/svg";
 
   /* ---------- helpers ---------- */
 
   function show(name, focus) {
     Object.keys(views).forEach(function (k) { views[k].hidden = k !== name; });
+    document.body.setAttribute("data-view", name);
     if (focus !== false) {
       var el = $(focusTargets[name]);
       if (el) { el.focus({ preventScroll: true }); window.scrollTo(0, 0); }
@@ -43,6 +46,13 @@
     return new Date(ts * 1000).toLocaleDateString(undefined, { day: "numeric", month: "long", year: "numeric" });
   }
 
+  function fmtShortDate(ts) {
+    var d = new Date(ts * 1000);
+    var opts = { day: "numeric", month: "short" };
+    if (d.getFullYear() !== new Date().getFullYear()) opts.year = "numeric";
+    return d.toLocaleDateString(undefined, opts);
+  }
+
   function el(tag, text, cls) {
     var e = document.createElement(tag);
     if (text != null) e.textContent = text;
@@ -50,9 +60,10 @@
     return e;
   }
 
-  function showError(message) {
+  function showError(message, removable) {
     stopPolling();
     $("error-message").textContent = message;
+    $("error-remove").hidden = !removable;
     show("error");
   }
 
@@ -118,10 +129,10 @@
     if (selected) {
       $("picked-name").textContent = selected.name;
       $("picked-size").textContent = fmtSize(selected.size);
-      $("go").focus();
     }
     if (!selected) $("file").value = "";
     updateGo();
+    if (selected && !$("go").disabled) $("go").focus();
   }
 
   $("file").addEventListener("change", function (e) { setSelected(e.target.files[0]); });
@@ -138,8 +149,100 @@
     var f = e.dataTransfer && e.dataTransfer.files[0];
     if (f) setSelected(f);
   });
+  // A click anywhere on the idle drop area opens the file picker.
+  $("drop-idle").addEventListener("click", function (e) {
+    if (e.target.closest("button, label, a, input")) return;
+    $("file").click();
+  });
   window.addEventListener("dragover", function (e) { e.preventDefault(); });
   window.addEventListener("drop", function (e) { e.preventDefault(); });
+
+  /* ---------- recording in the browser ---------- */
+
+  var rec = { stream: null, recorder: null, chunks: [], started: 0, timer: null, cancelled: false };
+
+  function pickMime() {
+    var options = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
+    for (var i = 0; i < options.length; i++) {
+      if (window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(options[i])) return options[i];
+    }
+    return "";
+  }
+
+  function setupRecorder() {
+    var api = !!(window.MediaRecorder && navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    $("rec-start").hidden = !(api && window.isSecureContext);
+    $("rec-hint").hidden = !(window.MediaRecorder && !window.isSecureContext);
+  }
+
+  function showRecordingUi(on) {
+    $("drop-idle").hidden = on;
+    $("drop-rec").hidden = !on;
+  }
+
+  function fmtClock(ms) {
+    var s = Math.floor(ms / 1000);
+    return Math.floor(s / 60) + ":" + (s % 60 < 10 ? "0" : "") + (s % 60);
+  }
+
+  function endRecording() {
+    clearInterval(rec.timer);
+    rec.timer = null;
+    if (rec.stream) rec.stream.getTracks().forEach(function (t) { t.stop(); });
+    rec.stream = null;
+    showRecordingUi(false);
+  }
+
+  function startRecording() {
+    var err = $("file-error");
+    err.hidden = true;
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (stream) {
+      var mime = pickMime();
+      var mr;
+      try { mr = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined); }
+      catch (x) { stream.getTracks().forEach(function (t) { t.stop(); }); throw x; }
+      rec.stream = stream;
+      rec.recorder = mr;
+      rec.chunks = [];
+      rec.cancelled = false;
+      mr.ondataavailable = function (e) { if (e.data && e.data.size) rec.chunks.push(e.data); };
+      mr.onstop = function () {
+        var type = mr.mimeType || mime || "audio/webm";
+        var chunks = rec.chunks;
+        var cancelled = rec.cancelled;
+        endRecording();
+        if (cancelled || !chunks.length) return;
+        var ext = type.indexOf("mp4") >= 0 ? "m4a" : type.indexOf("ogg") >= 0 ? "ogg" : "webm";
+        var d = new Date();
+        var pad = function (n) { return (n < 10 ? "0" : "") + n; };
+        var name = "recording-" + d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + "-" + pad(d.getHours()) + pad(d.getMinutes()) + "." + ext;
+        setSelected(new File(chunks, name, { type: type }));
+      };
+      mr.start(1000);
+      rec.started = Date.now();
+      $("rec-time").textContent = "0:00";
+      rec.timer = setInterval(function () { $("rec-time").textContent = fmtClock(Date.now() - rec.started); }, 500);
+      showRecordingUi(true);
+      $("rec-stop").focus();
+    }).catch(function (e) {
+      var denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      var missing = e && (e.name === "NotFoundError" || e.name === "OverconstrainedError");
+      err.textContent = denied ? "Microphone access was blocked. Allow it in the address bar, or choose a file instead."
+        : missing ? "No microphone was found. Choose a file instead."
+        : "Recording did not start. Choose a file instead.";
+      err.hidden = false;
+    });
+  }
+
+  $("rec-start").addEventListener("click", startRecording);
+  $("rec-stop").addEventListener("click", function () {
+    if (rec.recorder && rec.recorder.state !== "inactive") rec.recorder.stop();
+  });
+  $("rec-cancel").addEventListener("click", function () {
+    rec.cancelled = true;
+    if (rec.recorder && rec.recorder.state !== "inactive") rec.recorder.stop(); else endRecording();
+    $("rec-start").focus();
+  });
 
   /* ---------- upload ---------- */
 
@@ -179,13 +282,13 @@
         setSelected(null);
         location.hash = "#/note/" + body.id;
       } else {
-        showError(body.error || "The upload failed (" + xhr.status + ").");
+        showError(body.error || "The upload failed (" + xhr.status + ").", false);
       }
       updateGo();
     };
     xhr.onerror = function () {
       uploading = false;
-      showError("The upload was interrupted. Check your connection and try again.");
+      showError("The upload was interrupted. Check your connection and try again.", false);
       updateGo();
     };
     xhr.send(form);
@@ -210,6 +313,7 @@
     STEP_ORDER.forEach(function (s, i) {
       var li = document.querySelector('#steps li[data-step="' + s + '"]');
       li.className = i < idx ? "done" : i === idx ? (failed ? "failed" : "active") : "";
+      if (i === idx && !failed) li.setAttribute("aria-current", "step"); else li.removeAttribute("aria-current");
       setStepState(s, i < idx ? "Done" : i === idx ? activeText : "Waiting");
     });
   }
@@ -223,9 +327,59 @@
     if (views.progress.hidden) show("progress");
   }
 
-  /* ---------- result view ---------- */
+  /* ---------- diagrams ---------- */
 
-  var currentJob = null;
+  function svgEl(tag, attrs) {
+    var e = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+    return e;
+  }
+
+  function drawLayout(lay, cls) {
+    var svg = svgEl("svg", { viewBox: "0 0 " + lay.w + " " + lay.h, "class": "vis-svg " + cls, "aria-hidden": "true", focusable: "false" });
+    lay.items.forEach(function (it) {
+      var c = "v-" + it.role;
+      var node;
+      if (it.t === "rect") {
+        node = svgEl("rect", { x: it.x, y: it.y, width: it.w, height: it.h, rx: it.r, "class": c });
+      } else if (it.t === "circle") {
+        node = svgEl("circle", { cx: it.x, cy: it.y, r: it.r, "class": c });
+      } else if (it.t === "text") {
+        node = svgEl("text", { x: it.x, y: it.y, "font-size": it.size, "text-anchor": it.anchor, "class": c });
+        if (it.bold) node.setAttribute("font-weight", "600");
+        node.textContent = it.text;
+      } else if (it.t === "line") {
+        node = svgEl("polyline", { points: it.pts.map(function (p) { return p[0] + "," + p[1]; }).join(" "), "class": c });
+      } else if (it.t === "arrow") {
+        node = svgEl("polygon", { points: it.pts.map(function (p) { return p[0] + "," + p[1]; }).join(" "), "class": c });
+      }
+      if (node) svg.appendChild(node);
+    });
+    return svg;
+  }
+
+  function renderFigures(list) {
+    var host = $("figures");
+    host.textContent = "";
+    (list || []).forEach(function (v) {
+      var fig = el("figure", null, "figure");
+      fig.setAttribute("data-kind", v.kind);
+      var cap = el("figcaption");
+      cap.appendChild(el("span", v.title, "figure-title"));
+      cap.appendChild(el("span", v.caption, "figure-caption"));
+      fig.appendChild(cap);
+      var body = el("div", null, "figure-body");
+      body.setAttribute("role", "img");
+      body.setAttribute("aria-label", v.alt);
+      body.appendChild(drawLayout(v.layouts.wide, "vis-wide"));
+      body.appendChild(drawLayout(v.layouts.narrow, "vis-narrow"));
+      fig.appendChild(body);
+      host.appendChild(fig);
+    });
+    $("glance").hidden = !(list && list.length);
+  }
+
+  /* ---------- result view ---------- */
 
   function renderResult(job) {
     currentJob = job;
@@ -233,28 +387,42 @@
     $("result-title").textContent = n.title;
     var engine = job.engine && job.engine.indexOf("ollama:") === 0
       ? "Structured with " + job.engine.slice(7)
-      : "Structured with rule-based fallback";
-    var bits = [job.filename, fmtDuration(job.duration), fmtDate(job.created), engine].filter(Boolean);
-    $("result-meta").textContent = bits.join("  /  ");
+      : "Structured with rules";
+    var meta = $("result-meta");
+    meta.textContent = "";
+    [job.filename, fmtDuration(job.duration), fmtDate(job.created), engine].filter(Boolean).forEach(function (b) {
+      meta.appendChild(el("li", b));
+    });
     $("summary").textContent = n.summary;
     $("summary-block").hidden = !n.summary;
+    renderFigures(job.visuals);
 
     var host = $("sections");
     host.textContent = "";
-    n.sections.forEach(function (s) {
+    n.sections.forEach(function (s, i) {
       var sec = el("section");
-      sec.appendChild(el("h3", s.heading));
+      sec.appendChild(el("span", (i < 9 ? "0" : "") + (i + 1), "sec-n"));
+      var inner = el("div");
+      inner.appendChild(el("h3", s.heading));
       var ul = el("ul");
       s.bullets.forEach(function (b) { ul.appendChild(el("li", b)); });
-      sec.appendChild(ul);
+      inner.appendChild(ul);
+      sec.appendChild(inner);
       host.appendChild(sec);
     });
-    $("transcript").textContent = job.transcript || "";
+
+    var tr = $("transcript");
+    tr.textContent = "";
+    var paras = job.transcript_paragraphs && job.transcript_paragraphs.length
+      ? job.transcript_paragraphs : (job.transcript ? [job.transcript] : []);
+    paras.forEach(function (p) { tr.appendChild(el("p", p)); });
+
     $("copy-status").textContent = "";
     selectTab("notes", false);
     updateExportLinks();
     show("result");
     document.title = n.title + " - Voice Notes";
+    loadRecent();
   }
 
   function updateExportLinks() {
@@ -295,14 +463,34 @@
     }
   });
 
-  $("delete").addEventListener("click", function () {
-    if (!currentId) return;
-    if (!window.confirm("Delete this note and its transcript? This cannot be undone.")) return;
-    api("/api/notes/" + currentId, { method: "DELETE" }).then(function () {
-      location.hash = "#/";
-    }).catch(function (e) {
-      $("copy-status").textContent = e.message;
+  /* ---------- deleting ---------- */
+
+  function confirmDelete() {
+    var d = $("confirm");
+    if (typeof d.showModal !== "function") {
+      return Promise.resolve(window.confirm("Delete this note and its transcript? This cannot be undone."));
+    }
+    return new Promise(function (resolve) {
+      d.returnValue = "";
+      var onClose = function () { d.removeEventListener("close", onClose); resolve(d.returnValue === "delete"); };
+      d.addEventListener("close", onClose);
+      d.showModal();
     });
+  }
+
+  function removeCurrent(onError) {
+    if (!currentId) return;
+    confirmDelete().then(function (yes) {
+      if (!yes) return null;
+      return api("/api/notes/" + currentId, { method: "DELETE" }).then(function () { location.hash = "#/"; });
+    }).catch(function (e) { onError(e.message); });
+  }
+
+  $("delete").addEventListener("click", function () {
+    removeCurrent(function (m) { $("copy-status").textContent = m; });
+  });
+  $("error-remove").addEventListener("click", function () {
+    removeCurrent(function (m) { $("error-message").textContent = m; });
   });
 
   /* tabs */
@@ -328,31 +516,37 @@
     });
   });
 
-  /* ---------- recent notes ---------- */
+  /* ---------- note lists (sidebar and start page) ---------- */
+
+  function fillList(list, empty, items) {
+    list.textContent = "";
+    empty.hidden = items.length > 0;
+    list.hidden = items.length === 0;
+    items.forEach(function (it) {
+      var li = el("li");
+      var a = el("a", null, "row");
+      a.href = "#/note/" + it.id;
+      if (it.id === currentId) a.setAttribute("aria-current", "page");
+      var title = it.status === "done" ? (it.title || it.filename) : it.filename;
+      a.appendChild(el("span", title, "row-title"));
+      var state, bad = false;
+      if (it.status === "done") state = fmtShortDate(it.created);
+      else if (it.status === "error") { state = "Failed"; bad = true; }
+      else state = "Working";
+      a.appendChild(el("span", state, "row-meta" + (bad ? " bad" : "")));
+      var sub = [it.status === "done" && it.title ? it.filename : "", fmtDuration(it.duration)].filter(Boolean).join("  /  ");
+      if (sub) a.appendChild(el("span", sub, "row-sub"));
+      li.appendChild(a);
+      list.appendChild(li);
+    });
+  }
 
   function loadRecent() {
     return api("/api/notes").then(function (r) { return r.json(); }).then(function (items) {
-      var list = $("recent-list");
-      list.textContent = "";
-      $("recent-empty").hidden = items.length > 0;
-      list.hidden = items.length === 0;
-      items.forEach(function (it) {
-        var li = el("li");
-        var a = el("a", null, "row");
-        a.href = "#/note/" + it.id;
-        var title = it.status === "done" ? (it.title || it.filename) : it.filename;
-        a.appendChild(el("span", title, "row-title"));
-        var state;
-        if (it.status === "done") state = fmtDate(it.created);
-        else if (it.status === "error") state = "Failed";
-        else state = "In progress";
-        a.appendChild(el("span", state, "row-meta" + (it.status === "error" ? " row-state bad" : "")));
-        var sub = [it.status === "done" && it.title ? it.filename : "", fmtDuration(it.duration)].filter(Boolean).join("  /  ");
-        if (sub) a.appendChild(el("span", sub, "row-sub"));
-        li.appendChild(a);
-        list.appendChild(li);
-      });
-    }).catch(function () { /* the list is optional */ });
+      items = items.slice(0, 60);
+      fillList($("recent-list"), $("recent-empty"), items);
+      fillList($("side-list"), $("side-empty"), items);
+    }).catch(function () { /* the lists are optional */ });
   }
 
   /* ---------- polling and routing ---------- */
@@ -368,16 +562,17 @@
       if (job.status === "done" && job.notes) {
         renderResult(job);
       } else if (job.status === "error") {
-        showError(job.error || "Something went wrong while processing this file.");
+        showError(job.error || "Something went wrong while processing this file.", true);
+        loadRecent();
       } else {
         renderProgress(job);
         pollTimer = setTimeout(function () { poll(id); }, 1500);
       }
     }).catch(function (err) {
       if (id !== currentId) return;
-      if (err.status === 404) { showError("This note does not exist anymore."); return; }
+      if (err.status === 404) { showError("This note does not exist anymore.", false); return; }
       pollFailures += 1;
-      if (pollFailures > 6) { showError("The server stopped answering. Reload the page to check again."); return; }
+      if (pollFailures > 6) { showError("The server stopped answering. Reload the page to check again.", false); return; }
       pollTimer = setTimeout(function () { poll(id); }, 3000);
     });
   }
@@ -391,6 +586,7 @@
     if (m) {
       currentId = m[1];
       pollFailures = 0;
+      if (!health) loadHealth();
       poll(currentId);
     } else {
       currentId = null;
@@ -398,9 +594,9 @@
       if (!uploading) {
         show("start", !firstRoute);
         loadHealth();
-        loadRecent();
       }
     }
+    loadRecent();
   }
 
   $("error-retry").addEventListener("click", function () {
@@ -408,6 +604,7 @@
   });
 
   window.addEventListener("hashchange", function () { firstRoute = false; route(); });
+  setupRecorder();
   route();
   firstRoute = false;
 })();

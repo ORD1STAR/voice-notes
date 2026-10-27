@@ -109,7 +109,7 @@ def shot(page, name):
 
 def test_empty_state_and_layout(page):
     assert page.locator("h1").first.inner_text().startswith("Turn a voice note")
-    assert page.locator("#recent-empty").is_visible()
+    assert page.locator("#side-empty").is_visible()
     assert page.locator("#go").is_disabled() or not page.locator("#picked").is_visible()
     assert "local model qwen2.5:1.5b" in page.locator("#engine-line").inner_text()
     shot(page, "home.png")
@@ -130,10 +130,13 @@ def test_rejects_wrong_and_oversized_files(page, tmp_path):
 
 
 def test_keyboard_reaches_file_picker(page):
-    page.keyboard.press("Tab")  # skip link
-    page.keyboard.press("Tab")  # brand
-    page.keyboard.press("Tab")  # file input
-    assert page.evaluate("document.activeElement.id") == "file"
+    reached = []
+    for _ in range(6):
+        page.keyboard.press("Tab")
+        reached.append(page.evaluate("document.activeElement.id"))
+        if reached[-1] == "file":
+            break
+    assert reached[0] == "" and "file" in reached, reached  # the skip link has no id
 
 
 def test_full_flow_upload_to_exports(page, audio_file, tmp_path):
@@ -143,8 +146,8 @@ def test_full_flow_upload_to_exports(page, audio_file, tmp_path):
     page.click("#go")
 
     page.wait_for_selector("#view-progress:not([hidden])")
-    page.wait_for_function("document.getElementById('progress-detail').textContent.includes('Transcribing part 2')",
-                           timeout=20000)
+    # (Playwright's wait_for_function needs eval, which the page's content security policy forbids.)
+    page.locator("#progress-detail", has_text="Transcribing part 2").wait_for(timeout=20000)
     shot(page, "progress.png")
 
     page.wait_for_selector("#view-result:not([hidden])", timeout=40000)
@@ -192,25 +195,29 @@ def test_full_flow_upload_to_exports(page, audio_file, tmp_path):
 
     # Copy
     page.click("#copy")
-    page.wait_for_function("document.getElementById('copy-status').textContent.length > 0")
+    page.locator("#copy-status", has_text="copied").wait_for()
     assert "copied" in page.locator("#copy-status").inner_text().lower()
     assert page.evaluate("navigator.clipboard.readText()").startswith("# Website launch planning")
 
     # The note is in the recent list and a reload keeps it
     page.reload()
     assert page.locator("#result-title").inner_text() == "Website launch planning"
+    assert page.locator(".figure[data-kind=mindmap]").count() == 1
     page.click("#back")
-    page.wait_for_selector("#recent-list:not([hidden])")
-    assert "Website launch planning" in page.locator("#recent-list").inner_text()
+    page.wait_for_selector("#side-list:not([hidden])")
+    assert "Website launch planning" in page.locator("#side-list").inner_text()
     shot(page, "home-with-notes.png")
 
-    # Delete
-    page.click(".recent-list a.row")
+    # Delete, with the confirmation dialog: keeping the note first, then deleting it
+    page.click("#side-list a.row")
     page.wait_for_selector("#view-result:not([hidden])")
-    page.once("dialog", lambda d: d.accept())
     page.click("#delete")
+    page.click("#confirm-cancel")
+    assert page.locator("#view-result").is_visible()
+    page.click("#delete")
+    page.click("#confirm-delete")
     page.wait_for_selector("#view-start:not([hidden])")
-    page.wait_for_selector("#recent-empty:not([hidden])")
+    page.wait_for_selector("#side-empty:not([hidden])")
 
 
 def test_server_error_is_shown_clearly(browser, stack, audio_file, monkeypatch):
@@ -240,8 +247,13 @@ def test_server_error_is_shown_clearly(browser, stack, audio_file, monkeypatch):
         pg.wait_for_selector("#view-error:not([hidden])", timeout=20000)
         assert "Groq rejected the API key" in pg.locator("#error-message").inner_text()
         shot(pg, "error.png")
-        pg.click("#error-retry")
+        # A failed note can be removed from the error screen and then leaves the list.
+        assert pg.locator("#error-remove").is_visible()
+        assert "Failed" in pg.locator("#side-list").inner_text()
+        pg.click("#error-remove")
+        pg.click("#confirm-delete")
         pg.wait_for_selector("#view-start:not([hidden])")
+        pg.wait_for_selector("#side-empty:not([hidden])")
         ctx.close()
     finally:
         proc.terminate()

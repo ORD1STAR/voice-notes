@@ -4,127 +4,199 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Voice Notes</title>
-  <meta name="description" content="Upload a voice note and get a transcript and structured notes you can export as PDF, text or Markdown.">
+  <meta name="description" content="Upload or record a voice note and get a transcript and structured notes with diagrams, ready to export as PDF, text or Markdown.">
   <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#2447d6">
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="preload" href="/fonts/InstrumentSans-latin.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/style.css">
 </head>
 <body>
   <a class="skip" href="#main">Skip to content</a>
 
-  <header class="top">
-    <a class="brand" href="#/" id="brand">Voice Notes</a>
-    <p class="engine" id="engine-line" aria-live="polite"></p>
-  </header>
+  <div class="shell">
 
-  <main id="main">
+    <aside class="rail" aria-label="Navigation">
+      <a class="brand" href="#/" id="brand">
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <rect x="2" y="9" width="3.4" height="6" rx="1.7"/><rect x="7.2" y="5" width="3.4" height="14" rx="1.7"/>
+          <rect x="12.4" y="2" width="3.4" height="20" rx="1.7"/><rect x="17.6" y="7" width="3.4" height="10" rx="1.7"/>
+        </svg>
+        <span>Voice Notes</span>
+      </a>
+      <a class="btn primary new-note" href="#/" id="new-note">New note</a>
 
-    <!-- Start -->
-    <section id="view-start" aria-labelledby="start-title">
-      <h1 id="start-title" tabindex="-1">Turn a voice note into written notes</h1>
-      <p class="lede">Upload a recording of up to <span id="max-mb">200</span> MB. It is transcribed, organised into headings and bullets, and ready to export.</p>
+      <nav class="rail-list" aria-labelledby="side-title">
+        <h2 class="eyebrow" id="side-title">Your notes</h2>
+        <p class="empty" id="side-empty">Nothing here yet.</p>
+        <ul class="note-list" id="side-list" hidden></ul>
+      </nav>
+    </aside>
 
-      <div id="setup-notice" class="notice" role="status" hidden></div>
+    <div class="stage">
+      <main id="main">
 
-      <form id="upload-form" novalidate>
-        <div class="drop" id="drop">
-          <input class="file-input" type="file" id="file" name="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac,.webm,.mp4,.mkv,.amr">
-          <label for="file" class="drop-label" id="drop-label">
-            <span class="drop-title">Drop an audio file here</span>
-            <span class="drop-sub">or <span class="link-like">choose a file</span> from your device. MP3, M4A, WAV, OGG, FLAC, WebM and most video files work.</span>
-          </label>
-        </div>
+        <!-- Start -->
+        <section id="view-start" aria-labelledby="start-title">
+          <p class="eyebrow">New note</p>
+          <h1 id="start-title" tabindex="-1">Turn a voice note into clean notes</h1>
+          <p class="lede">Upload or record up to <span id="max-mb">200</span> MB of audio. You get a transcript, a summary, sections with bullets and diagrams, ready to export.</p>
 
-        <div class="picked" id="picked" hidden>
-          <div class="picked-info">
-            <span class="picked-name" id="picked-name"></span>
-            <span class="picked-size" id="picked-size"></span>
-          </div>
+          <div id="setup-notice" class="notice" role="status" hidden></div>
+
+          <form id="upload-form" novalidate>
+            <div class="drop" id="drop">
+              <input class="file-input" type="file" id="file" name="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.ogg,.opus,.flac,.aac,.webm,.mp4,.mkv,.amr">
+
+              <div class="drop-idle" id="drop-idle">
+                <svg class="wave" viewBox="0 0 120 40" aria-hidden="true" focusable="false">
+                  <rect x="0" y="16" width="4" height="8" rx="2"/><rect x="10" y="10" width="4" height="20" rx="2"/>
+                  <rect x="20" y="4" width="4" height="32" rx="2"/><rect x="30" y="12" width="4" height="16" rx="2"/>
+                  <rect x="40" y="18" width="4" height="4" rx="2"/><rect x="50" y="8" width="4" height="24" rx="2"/>
+                  <rect x="60" y="0" width="4" height="40" rx="2"/><rect x="70" y="9" width="4" height="22" rx="2"/>
+                  <rect x="80" y="15" width="4" height="10" rx="2"/><rect x="90" y="6" width="4" height="28" rx="2"/>
+                  <rect x="100" y="13" width="4" height="14" rx="2"/><rect x="110" y="17" width="4" height="6" rx="2"/>
+                </svg>
+                <p class="drop-title">Drop a recording here</p>
+                <p class="drop-sub">MP3, M4A, WAV, OGG, FLAC, WebM and most video files.</p>
+                <div class="actions">
+                  <label for="file" class="btn primary" id="choose">Choose a file</label>
+                  <button type="button" class="btn" id="rec-start" hidden>Record now</button>
+                </div>
+                <p class="drop-hint" id="rec-hint" hidden>Recording in the browser needs a secure address (https or localhost).</p>
+              </div>
+
+              <div class="drop-rec" id="drop-rec" hidden>
+                <p class="rec-state"><span class="rec-dot" aria-hidden="true"></span><span id="rec-label">Recording</span> <span class="rec-time" id="rec-time">0:00</span></p>
+                <div class="actions">
+                  <button type="button" class="btn primary" id="rec-stop">Stop and keep</button>
+                  <button type="button" class="btn quiet" id="rec-cancel">Cancel</button>
+                </div>
+              </div>
+            </div>
+
+            <div class="picked" id="picked" hidden>
+              <div class="picked-info">
+                <span class="eyebrow">Ready to transcribe</span>
+                <span class="picked-name" id="picked-name"></span>
+                <span class="picked-size" id="picked-size"></span>
+              </div>
+              <div class="actions">
+                <button type="submit" class="btn primary" id="go">Transcribe</button>
+                <button type="button" class="btn quiet" id="clear">Remove</button>
+              </div>
+            </div>
+
+            <p class="field-error" id="file-error" role="alert" hidden></p>
+          </form>
+
+          <ol class="how" aria-label="How it works">
+            <li><span class="how-n">1</span><span><strong>Transcribe</strong> The audio is cut into parts and written out.</span></li>
+            <li><span class="how-n">2</span><span><strong>Structure</strong> A title, summary, sections and diagrams are built from the text.</span></li>
+            <li><span class="how-n">3</span><span><strong>Export</strong> Take it as PDF, Markdown or plain text.</span></li>
+          </ol>
+
+          <section class="recent" aria-labelledby="recent-title">
+            <h2 class="eyebrow" id="recent-title">Recent notes</h2>
+            <p class="empty" id="recent-empty">No notes yet. Notes you create will be listed here.</p>
+            <ul class="note-list" id="recent-list" hidden></ul>
+          </section>
+        </section>
+
+        <!-- Progress -->
+        <section id="view-progress" aria-labelledby="progress-title" hidden>
+          <p class="eyebrow">In progress</p>
+          <h1 id="progress-title" tabindex="-1">Working on your note</h1>
+          <p class="lede file-line" id="progress-file"></p>
+
+          <ol class="steps" id="steps">
+            <li data-step="upload"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Upload</span><span class="step-state">Waiting</span></li>
+            <li data-step="converting"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Prepare the audio</span><span class="step-state">Waiting</span></li>
+            <li data-step="transcribing"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Transcribe</span><span class="step-state">Waiting</span></li>
+            <li data-step="structuring"><span class="step-dot" aria-hidden="true"></span><span class="step-name">Structure the notes</span><span class="step-state">Waiting</span></li>
+          </ol>
+
+          <div class="bar" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><span id="bar-fill"></span></div>
+          <p class="detail" id="progress-detail" aria-live="polite">Starting</p>
+          <p class="hint">Long recordings take a while, mostly while structuring. You can leave this page: the note will show up in your list when it is done.</p>
+        </section>
+
+        <!-- Error -->
+        <section id="view-error" aria-labelledby="error-title" hidden>
+          <p class="eyebrow">Something went wrong</p>
+          <h1 id="error-title" tabindex="-1">This note could not be created</h1>
+          <p class="error-box" id="error-message" role="alert"></p>
           <div class="actions">
-            <button type="submit" class="btn primary" id="go">Transcribe</button>
-            <button type="button" class="btn quiet" id="clear">Remove</button>
+            <button type="button" class="btn primary" id="error-retry">Try another file</button>
+            <button type="button" class="btn quiet danger" id="error-remove" hidden>Remove this note</button>
           </div>
-        </div>
+        </section>
 
-        <p class="field-error" id="file-error" role="alert" hidden></p>
-      </form>
+        <!-- Result -->
+        <section id="view-result" aria-labelledby="result-title" hidden>
+          <p class="crumb"><a href="#/" id="back">All notes</a></p>
+          <h1 id="result-title" class="note-title" tabindex="-1"></h1>
+          <ul class="meta" id="result-meta" aria-label="Details"></ul>
 
-      <section class="recent" aria-labelledby="recent-title">
-        <h2 id="recent-title">Recent notes</h2>
-        <p class="empty" id="recent-empty">No notes yet. Notes you create will be listed here.</p>
-        <ul class="recent-list" id="recent-list" hidden></ul>
-      </section>
-    </section>
+          <div class="toolbar">
+            <div class="export" role="group" aria-label="Export">
+              <span class="toolbar-label">Export</span>
+              <a class="btn" id="exp-pdf" href="#" download>PDF</a>
+              <a class="btn" id="exp-md" href="#" download>Markdown</a>
+              <a class="btn" id="exp-txt" href="#" download>Text</a>
+            </div>
+            <label class="check"><input type="checkbox" id="with-transcript"> With transcript</label>
+            <div class="toolbar-end">
+              <button type="button" class="btn quiet" id="copy">Copy notes</button>
+              <button type="button" class="btn quiet danger" id="delete">Delete</button>
+            </div>
+          </div>
+          <p class="status-line" id="copy-status" role="status" aria-live="polite"></p>
 
-    <!-- Progress -->
-    <section id="view-progress" aria-labelledby="progress-title" hidden>
-      <h1 id="progress-title" tabindex="-1">Working on your note</h1>
-      <p class="lede" id="progress-file"></p>
+          <div class="tabs" role="tablist" aria-label="Note content">
+            <button role="tab" id="tab-notes" aria-controls="panel-notes" aria-selected="true" tabindex="0">Notes</button>
+            <button role="tab" id="tab-transcript" aria-controls="panel-transcript" aria-selected="false" tabindex="-1">Transcript</button>
+          </div>
 
-      <ol class="steps" id="steps">
-        <li data-step="upload"><span class="step-name">Upload</span><span class="step-state">Waiting</span></li>
-        <li data-step="converting"><span class="step-name">Prepare the audio</span><span class="step-state">Waiting</span></li>
-        <li data-step="transcribing"><span class="step-name">Transcribe</span><span class="step-state">Waiting</span></li>
-        <li data-step="structuring"><span class="step-name">Structure the notes</span><span class="step-state">Waiting</span></li>
-      </ol>
+          <div role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" tabindex="0">
+            <div class="summary" id="summary-block">
+              <h2 class="eyebrow">Summary</h2>
+              <p id="summary"></p>
+            </div>
+            <section class="glance" id="glance" aria-labelledby="glance-title" hidden>
+              <div class="glance-head">
+                <h2 class="eyebrow" id="glance-title">At a glance</h2>
+                <p class="glance-note">These diagrams are included in the PDF.</p>
+              </div>
+              <div id="figures"></div>
+            </section>
+            <div id="sections"></div>
+          </div>
+          <div role="tabpanel" id="panel-transcript" aria-labelledby="tab-transcript" tabindex="0" hidden>
+            <div class="transcript" id="transcript"></div>
+          </div>
+        </section>
 
-      <div class="bar" role="progressbar" aria-label="Overall progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><span id="bar-fill"></span></div>
-      <p class="detail" id="progress-detail" aria-live="polite">Starting</p>
-      <p class="hint">Long recordings take a while, mostly during structuring. You can leave this page and come back: the note will appear in your recent notes.</p>
-    </section>
+      </main>
 
-    <!-- Error -->
-    <section id="view-error" aria-labelledby="error-title" hidden>
-      <h1 id="error-title" tabindex="-1">This note could not be created</h1>
-      <p class="error-box" id="error-message" role="alert"></p>
-      <div class="actions">
-        <button type="button" class="btn primary" id="error-retry">Try another file</button>
+      <footer class="foot">
+        <p id="engine-line" aria-live="polite">Transcription by Groq Whisper. Structuring runs on this server.</p>
+      </footer>
+    </div>
+  </div>
+
+  <dialog id="confirm" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title">Delete this note?</h2>
+      <p>The notes and the transcript will be removed from this server. This cannot be undone.</p>
+      <div class="actions end">
+        <button type="submit" value="cancel" class="btn" id="confirm-cancel">Keep it</button>
+        <button type="submit" value="delete" class="btn danger-solid" id="confirm-delete">Delete</button>
       </div>
-    </section>
+    </form>
+  </dialog>
 
-    <!-- Result -->
-    <section id="view-result" aria-labelledby="result-title" hidden>
-      <p class="crumb"><a href="#/" id="back">All notes</a></p>
-      <h1 id="result-title" class="note-title" tabindex="-1"></h1>
-      <p class="meta" id="result-meta"></p>
-
-      <div class="toolbar">
-        <div class="export" role="group" aria-label="Export">
-          <span class="toolbar-label">Export</span>
-          <a class="btn" id="exp-pdf" href="#" download>PDF</a>
-          <a class="btn" id="exp-txt" href="#" download>Text</a>
-          <a class="btn" id="exp-md" href="#" download>Markdown</a>
-        </div>
-        <label class="check"><input type="checkbox" id="with-transcript"> Include the transcript</label>
-        <div class="toolbar-end">
-          <button type="button" class="btn quiet" id="copy">Copy notes</button>
-          <button type="button" class="btn quiet danger" id="delete">Delete</button>
-        </div>
-      </div>
-      <p class="status-line" id="copy-status" role="status" aria-live="polite"></p>
-
-      <div class="tabs" role="tablist" aria-label="Note content">
-        <button role="tab" id="tab-notes" aria-controls="panel-notes" aria-selected="true" tabindex="0">Notes</button>
-        <button role="tab" id="tab-transcript" aria-controls="panel-transcript" aria-selected="false" tabindex="-1">Transcript</button>
-      </div>
-
-      <div role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" tabindex="0">
-        <div class="summary" id="summary-block">
-          <h2>Summary</h2>
-          <p id="summary"></p>
-        </div>
-        <div id="sections"></div>
-      </div>
-      <div role="tabpanel" id="panel-transcript" aria-labelledby="tab-transcript" tabindex="0" hidden>
-        <p class="transcript" id="transcript"></p>
-      </div>
-    </section>
-
-  </main>
-
-  <footer class="foot">
-    <p>Transcription by Groq Whisper. Structuring runs on this server.</p>
-  </footer>
-
+  <noscript><p class="notice">Voice Notes needs JavaScript to run.</p></noscript>
   <script src="/app.js"></script>
 </body>
 </html>
