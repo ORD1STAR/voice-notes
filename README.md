@@ -15,11 +15,14 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 ## Features
 
 - Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker, or record straight from the browser (needs https or localhost for microphone access).
-- Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined.
+- Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined. Chunks are cut in the quiet gaps between words, so no word is split in two; when there is no gap, the next chunk starts two seconds early and the repeated words are removed when the texts are joined.
 - Structuring with a small local model served by Ollama. If Ollama is not running, a rule-based fallback still produces a title, summary and sections, and the interface says which one was used. If the model fails on one part of a long note, only that part falls back to the rules.
 - Diagrams built from the notes where they help: a mind map of the sections, a process flow when the speaker describes steps in order, and a bar chart when several amounts or percentages are mentioned. They appear in the online notes and in the PDF. See the next section.
+- Action items: tasks the speaker sets for themselves ("I need to call...", "remember to...", "il faut...") are collected in a checklist with tick boxes in the page (remembered in your browser), as empty boxes in the PDF and as `- [ ]` lines in Markdown.
 - Export to PDF, TXT or Markdown, with or without the full transcript (split into readable paragraphs).
-- Live progress through each step, clear error messages, and a list of notes that survives a restart. Failed notes can be removed.
+- Rename a note, and search all your notes (titles, summaries, bullets, action items, file names and the full transcript) from the list.
+- Live progress through each step, with the time spent on the current step, the place in the queue and a clear statement of how the notes are built. When Ollama is not available the page says so, and why.
+- A note that failed because of a temporary problem (the transcription service did not answer, the server restarted) can be tried again without uploading the file once more. The recording is kept for a week for that purpose, or until the note is deleted.
 - Keyboard friendly, works on phones, follows the system light or dark setting.
 - No build step: the frontend is plain HTML, CSS and JavaScript. The two typefaces (Instrument Sans and Instrument Serif) are bundled, so nothing is loaded from another site.
 
@@ -83,7 +86,7 @@ Everything is set through environment variables.
 | `OLLAMA_MODEL` | `qwen2.5:1.5b` | Model used for structuring. |
 | `OLLAMA_HOST_URL` | `http://127.0.0.1:11434` | Where Ollama listens. |
 | `OLLAMA_TIMEOUT` | `240` | Seconds to wait for one model call before falling back. |
-| `DATA_DIR` | `./data` | Where notes are stored. Uploaded audio is deleted once processed. |
+| `DATA_DIR` | `./data` | Where notes are stored. Uploaded audio is deleted once a note is done; for a failed note that can be retried it is kept for up to a week. |
 | `FFMPEG_BIN` | `ffmpeg` | Path to the ffmpeg executable. |
 
 ## Running it
@@ -101,19 +104,21 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 ## How it works
 
 1. The upload is saved to disk in 1 MB blocks and refused as soon as it passes the size limit.
-2. ffmpeg converts it to mono 16 kHz MP3 and cuts it into chunks. At 48 kbit/s ten minutes are about 3.6 MB, so even a 4 hour recording stays far below the Groq limit per file.
-3. Each chunk is sent to Groq Whisper. Rate limits and temporary errors are retried with backoff.
+2. ffmpeg converts it to mono 16 kHz MP3 and cuts it into chunks. At 48 kbit/s ten minutes are about 3.6 MB, so even a 4 hour recording stays far below the Groq limit per file. Each cut is made at the quiet gap closest to the target length (found with ffmpeg's `silencedetect`).
+3. Each chunk is sent to Groq Whisper. Rate limits and temporary errors are retried with backoff. Chunks that had to start in the middle of speech repeat two seconds of the one before; the repeated words are found with a fuzzy match and removed.
 4. The joined transcript is split on sentence boundaries into pieces of about 3500 characters. Each piece goes to the local model, which answers in JSON (title, summary, sections with bullets). A final short call writes the overall title and summary.
-5. If Ollama is missing or a call fails, the rule-based structuring takes over for the whole note.
+5. If Ollama is missing or a call fails, the rule-based structuring takes over (for the whole note when the model is missing, and only for the failing part when it fails on one piece). The rules remove spoken filler and repeated sentences, start a new section where the vocabulary changes, name sections after their most repeated word pair, take the title from "a note about ..." openings and collect the action items.
 
 ## API
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/api/health` | Server status: ffmpeg, key present, Ollama state. |
+| `GET` | `/api/health` | Server status: ffmpeg, key present, Ollama state, and `structuring` (the engine the next note will use and, if it is the fallback, why). |
 | `POST` | `/api/notes` | Multipart upload with a `file` field. Returns `{"id": ...}` with status 202. |
-| `GET` | `/api/notes` | Recent notes. |
+| `GET` | `/api/notes?q=garden` | Recent notes. With `q`, only the notes that contain every word of it, best title matches first, each with a `snippet`. |
 | `GET` | `/api/notes/{id}` | Status, progress and, once done, the notes, the transcript (also as `transcript_paragraphs`) and the `visuals` drawings. |
+| `PATCH` | `/api/notes/{id}` | Rename a finished note: `{"title": "..."}`. |
+| `POST` | `/api/notes/{id}/retry` | Run a failed note again (202), or 409 when it cannot be retried. |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
@@ -131,7 +136,7 @@ playwright install chromium
 pytest tests/e2e
 ```
 
-They cover upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
+They cover renaming, searching, the checklist, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
 
 ## Project layout
 
@@ -153,9 +158,10 @@ deploy/           example systemd unit
 ## Known limits
 
 - One recording is processed at a time; others wait in a queue.
-- Chunks are cut at fixed times, so a word at a boundary can occasionally be split.
+- Very noisy recordings may have no quiet gaps; the overlap then does the work, and a repeated phrase at the exact seam can occasionally be dropped or kept twice.
 - PDF export covers Latin, Greek and Cyrillic text. Arabic, Hebrew and Chinese are not rendered correctly yet.
-- Notes cannot be edited in the interface yet.
+- A note can be renamed, but its text cannot be edited in the interface yet.
+- Action items are found with simple phrases ("need to", "should", "remember to" and a few French and Spanish ones). A task said in other words is not picked up.
 - Diagrams use simple rules on the note text. A note that never says its steps in order or never gives numbers will not get a process or chart, by design.
 - Recording in the browser is only offered on https or localhost, because browsers block the microphone elsewhere.
 
