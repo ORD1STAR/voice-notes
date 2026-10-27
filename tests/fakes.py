@@ -35,6 +35,30 @@ NOTES = {
     ],
 }
 
+# Notes with a sequence of steps and several figures, so every kind of diagram appears.
+RICH_NOTES = {
+    "title": "Quarterly launch plan",
+    "summary": "The team plans the quarterly launch in three steps, keeps to a fixed budget and sets growth targets.",
+    "sections": [
+        {"heading": "Launch steps", "bullets": [
+            "First, freeze the content and run the final checks.",
+            "Then deploy the site to staging and ask the team to review it.",
+            "Finally switch the domain over and watch the dashboards for an hour."]},
+        {"heading": "Budget", "bullets": [
+            "The ad budget is 5000 euros for the quarter.",
+            "Content production costs 2,500 euros.",
+            "Tooling costs 800 euros per year.",
+            "Sarah prepares the spending report."]},
+        {"heading": "Growth targets", "bullets": [
+            "Reach 30% more signups than last quarter.",
+            "Cut churn by 12% this year.",
+            "Get 45% of users onto the mobile app."]},
+        {"heading": "Team rhythm", "bullets": [
+            "Meet every Monday morning.",
+            "Keep the meeting short and focused on blockers."]},
+    ],
+}
+
 
 class _Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
@@ -67,12 +91,13 @@ class _Handler(BaseHTTPRequestHandler):
             return self._send(200, {"text": PARTS[i % len(PARTS)]})
         if self.path == "/api/chat":
             time.sleep(self.server.delay)
-            return self._send(200, {"message": {"content": json.dumps(NOTES)}})
+            return self._send(200, {"message": {"content": json.dumps(self.server.notes)}})
         self._send(404, {})
 
 
-def start_fake(delay: float = 0.0, model: str = "qwen2.5:1.5b", key: str = "test-key-not-real"):
+def start_fake(delay: float = 0.0, model: str = "qwen2.5:1.5b", key: str = "test-key-not-real", notes: dict | None = None):
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    server.notes = notes or NOTES
     server.delay = delay
     server.model = model
     server.expected_key = key
