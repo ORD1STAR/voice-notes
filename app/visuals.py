@@ -12,7 +12,7 @@ Item types: rect, text (one line, baseline at y), line (polyline), arrow (filled
 import re
 from pathlib import Path
 
-from .structure import short_phrase
+from .structure import is_context_dependent, short_phrase
 
 WIDE = 640
 NARROW = 340
@@ -158,8 +158,11 @@ def mindmap_data(notes: dict) -> dict | None:
     per_branch = MAX_LEAVES if len(sections) <= 5 else MAX_LEAVES - 1
     for sec in sections[:MAX_BRANCHES]:
         leaves, seen = [], set()
-        for b in sec["bullets"]:
-            p = short_phrase(_CUE.sub("", b.strip(), count=1).strip() or b, 7)
+        # points that stand on their own come first; "That is something we should fix" only fills a free place
+        ordered = [b for b in sec["bullets"] if not is_context_dependent(b)] + [
+            b for b in sec["bullets"] if is_context_dependent(b)]
+        for b in ordered:
+            p = short_phrase(_CUE.sub("", b.strip(), count=1).strip() or b, 9)
             key = p.lower()
             if p and key not in seen:
                 seen.add(key)
@@ -248,8 +251,9 @@ def _mindmap_narrow(data: dict) -> dict:
 # ----------------------------------------------------------------- flow
 
 _CUE = re.compile(
-    r"^(?:(?:so|and|well|okay|ok|now|also)\b[\s,]*)?(?:first(?:ly)?|second(?:ly)?|third(?:ly)?|fourth|fifth|then|next|after that|afterwards?|finally|lastly|"
-    r"last|once that(?: is done)?|step\s*\d+|\d{1,2}[.)]|d'abord|ensuite|puis|enfin|apr[eè]s|"
+    r"^(?:(?:so|and|well|okay|ok|now|also)\b[\s,]*)?(?:first(?:ly)?(?!\s+time)|second(?:ly)?|third(?:ly)?|fourth|fifth|then|"
+    r"next(?!\s+(?:time|week|month|year|day|days|night|morning|evening|quarter|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday))|after that|afterwards?|finally|lastly|"
+    r"last(?!\s+(?:time|week|month|year|day|days|night|morning|evening|quarter|weekend|monday|tuesday|wednesday|thursday|friday|saturday|sunday))|once that(?: is done)?|step\s*\d+|\d{1,2}[.)]|d'abord|ensuite|puis|enfin|apr[eè]s|"
     r"primero|luego|despu[eé]s|finalmente)\b[\s,:.)-]*",
     re.IGNORECASE,
 )
@@ -436,6 +440,8 @@ def chart_data(notes: dict) -> dict | None:
     groups: dict[str, list[tuple[str, float]]] = {}
     for sec in notes.get("sections") or []:
         for b in sec["bullets"]:
+            if _CUE.match(b.strip()):
+                continue  # the amounts and times inside process steps belong to the process diagram
             figures = _find_figures(b)
             if not figures:
                 continue

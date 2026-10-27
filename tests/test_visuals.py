@@ -98,6 +98,7 @@ def test_nothing_is_invented():
         source = set(re.findall(r"[\w']+", all_text(notes).replace(",", "")))
         source |= {w for w in re.findall(r"[\w']+", " ".join(
             str(x) for s in notes["sections"] for x in s["bullets"]).lower().replace(",", ""))}
+        source |= {w.split("'")[0] for w in source} | {"s"}  # "week's" is made of the words "week" and "s"
         for v in visuals.build_visuals(notes):
             for lay in v["layouts"].values():
                 for it in lay["items"]:
@@ -159,3 +160,30 @@ def test_figures_listed_in_one_sentence_become_separate_bars():
     chart = visuals.chart_data(n)
     assert [(i["label"], i["value"]) for i in chart["items"]] == [
         ("The compost", 400.0), ("The seeds", 150.0), ("The irrigation parts", 220.0)]
+
+
+def test_next_time_and_last_week_are_not_steps():
+    n = note(("Bread", ["First feed the starter.", "Then mix the dough.", "Finally bake it.",
+                        "The starter must be active.", "Next time I will try rye flour."]),
+             ("B", ["x"]), ("C", ["y"]))
+    flow = by_kind(n)["flow"]
+    assert "rye" not in flow["alt"] and "must be active" not in flow["alt"]
+    assert "Process in 3 steps" in flow["alt"]
+    assert visuals._CUE.match("Last week we met.") is None and visuals._CUE.match("First time I tried it.") is None
+    assert visuals._CUE.match("Last, close the lid.") and visuals._CUE.match("Next, add salt.")
+
+
+def test_amounts_inside_process_steps_do_not_make_a_chart():
+    n = note(("Bread", ["First rest the dough for 30 minutes.", "Then fold it every 20 minutes.",
+                        "Finally bake it for 45 minutes."]), ("B", ["x"]), ("C", ["y"]))
+    assert "chart" not in by_kind(n)
+    assert "flow" in by_kind(n)
+
+
+def test_mind_map_leaves_prefer_points_that_stand_alone():
+    n = note(("Feedback", ["Support gets 40 tickets per week.", "That is something we should fix.",
+                           "The export is too slow.", "Customers asked for dark mode."]),
+             ("B", ["x"]), ("C", ["y"]))
+    mm = visuals.mindmap_data(n)
+    leaves = mm["branches"][0]["leaves"]
+    assert "That is something we should fix" not in leaves and len(leaves) == 3
