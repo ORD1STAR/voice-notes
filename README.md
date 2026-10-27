@@ -14,13 +14,26 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 
 ## Features
 
-- Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker.
+- Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker, or record straight from the browser (needs https or localhost for microphone access).
 - Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined.
-- Structuring with a small local model served by Ollama. If Ollama is not running, a rule-based fallback still produces a title, summary and sections, and the interface says which one was used.
-- Export to PDF, TXT or Markdown, with or without the full transcript.
-- Live progress through each step, clear error messages, and a list of recent notes that survives a restart.
+- Structuring with a small local model served by Ollama. If Ollama is not running, a rule-based fallback still produces a title, summary and sections, and the interface says which one was used. If the model fails on one part of a long note, only that part falls back to the rules.
+- Diagrams built from the notes where they help: a mind map of the sections, a process flow when the speaker describes steps in order, and a bar chart when several amounts or percentages are mentioned. They appear in the online notes and in the PDF. See the next section.
+- Export to PDF, TXT or Markdown, with or without the full transcript (split into readable paragraphs).
+- Live progress through each step, clear error messages, and a list of notes that survives a restart. Failed notes can be removed.
 - Keyboard friendly, works on phones, follows the system light or dark setting.
-- No build step: the frontend is plain HTML, CSS and JavaScript.
+- No build step: the frontend is plain HTML, CSS and JavaScript. The two typefaces (Instrument Sans and Instrument Serif) are bundled, so nothing is loaded from another site.
+
+## Diagrams
+
+Diagrams are derived from the finished notes, never invented, and they only appear when the notes support them:
+
+| Diagram | Shown when |
+| --- | --- |
+| Mind map | The note has three or more sections. The title is the center, sections are branches, and the first points of each section are the leaves. |
+| Process | A section reads as a sequence (at least two bullets that start with words such as first, then, next, finally, or step 1, in English, French or Spanish), or a similar sequence is spread over the note. |
+| Key figures | At least three bullets mention a number with the same unit (percent, euros, dollars, pounds, hours, minutes, days, weeks, months, km, kg) and the values differ. |
+
+Each diagram is computed by `app/visuals.py` as a small drawing in two layouts: a wide one for large screens and the PDF, and a narrow one for phones. The page turns the drawing into inline SVG that follows the light and dark theme; the PDF export draws the same shapes. Old notes get diagrams too, since nothing extra is stored.
 
 ## Screenshots
 
@@ -100,7 +113,7 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `GET` | `/api/health` | Server status: ffmpeg, key present, Ollama state. |
 | `POST` | `/api/notes` | Multipart upload with a `file` field. Returns `{"id": ...}` with status 202. |
 | `GET` | `/api/notes` | Recent notes. |
-| `GET` | `/api/notes/{id}` | Status, progress, transcript and notes. |
+| `GET` | `/api/notes/{id}` | Status, progress and, once done, the notes, the transcript (also as `transcript_paragraphs`) and the `visuals` drawings. |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
@@ -118,7 +131,7 @@ playwright install chromium
 pytest tests/e2e
 ```
 
-They cover upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, text contrast in light and dark mode, and a phone sized layout. Set `SCREENSHOT_DIR` to save screenshots of each screen.
+They cover upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
 
 ## Project layout
 
@@ -129,6 +142,7 @@ app/
   audio.py        ffmpeg conversion and chunking
   transcribe.py   Groq client
   structure.py    Ollama structuring and the rule-based fallback
+  visuals.py      mind map, process and chart drawings built from the notes
   export.py       PDF, TXT and Markdown output
   static/         the web interface
 tests/            backend tests and tests/e2e browser tests
@@ -142,7 +156,9 @@ deploy/           example systemd unit
 - Chunks are cut at fixed times, so a word at a boundary can occasionally be split.
 - PDF export covers Latin, Greek and Cyrillic text. Arabic, Hebrew and Chinese are not rendered correctly yet.
 - Notes cannot be edited in the interface yet.
+- Diagrams use simple rules on the note text. A note that never says its steps in order or never gives numbers will not get a process or chart, by design.
+- Recording in the browser is only offered on https or localhost, because browsers block the microphone elsewhere.
 
 ## License
 
-MIT. The bundled DejaVu fonts used for the PDF export have their own permissive license, included in `app/fonts`.
+MIT. The bundled DejaVu fonts used for the PDF export have their own permissive license, included in `app/fonts`. The Instrument Sans and Instrument Serif web fonts are under the SIL Open Font License, included in `app/static/fonts`.
