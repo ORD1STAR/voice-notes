@@ -52,7 +52,12 @@ def load_all() -> None:
                 job = json.loads(f.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            if job.get("status") in ("queued", "processing"):
+            if job.get("status") in ("queued", "processing") and job.get("restructure") and job.get("notes"):
+                # a rebuild was interrupted: the notes from before are still complete
+                job.update(status="done", stage="done", progress=1.0, detail="Done", restructure=False, error=None,
+                           rebuild_error="The server restarted before the notes were rebuilt. The earlier notes are kept.")
+                _save(job)
+            elif job.get("status") in ("queued", "processing"):
                 job.update(status="error", error="The server restarted before this note was finished.",
                            retryable=True)
                 _save(job)
@@ -194,6 +199,7 @@ def rename(job_id: str, title: str) -> dict | None:
         if not job or job["status"] != "done" or not job.get("notes"):
             return None
         job["notes"] = {**job["notes"], "title": title}
+        job["custom_title"] = title  # a rebuild keeps a title the user chose
         _save(job)
         return dict(job)
 
@@ -230,6 +236,34 @@ def retry(job_id: str) -> bool:
         _save(job)
     start(job_id)
     return True
+
+
+def restructure(job_id: str) -> bool:
+    """Build the notes of a finished note again from its saved transcript, with the engine available now.
+
+    The earlier notes stay in place until the new ones are ready, and are kept if the rebuild fails.
+    """
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job["status"] != "done" or not job.get("notes") or not (job.get("transcript") or "").strip():
+            return False
+        job.update(status="queued", stage="queued", stage_started=time.time(), progress=0.0, detail="Waiting to start",
+                   error=None, retryable=False, restructure=True, rebuild_error=None)
+        _save(job)
+    start(job_id)
+    return True
+
+
+def _fail(job_id: str, message: str, retryable: bool) -> None:
+    """Mark a job as failed, except for a rebuild, which falls back to the notes it already had."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if job is not None and job.get("restructure") and job.get("notes"):
+            job.update(status="done", stage="done", progress=1.0, detail="Done", error=None, retryable=False,
+                       restructure=False, rebuild_error=f"The notes could not be rebuilt: {message} The earlier notes are kept.")
+            _save(job)
+            return
+    _update(job_id, status="error", error=message, detail="Failed", retryable=retryable)
 
 
 def run(job_id: str) -> None:
@@ -280,16 +314,18 @@ def run(job_id: str) -> None:
                 _update(job_id, progress=0.72 + 0.26 * done / total, detail=label)
 
             notes, engine = structure.structure_transcript(text, on_structure)
+            custom = (get(job_id) or {}).get("custom_title")
+            if custom:
+                notes = {**notes, "title": custom}
             _update(job_id, notes=notes, engine=engine, status="done", stage="done",
-                    progress=1.0, detail="Done", retryable=False)
+                    progress=1.0, detail="Done", retryable=False, restructure=False, rebuild_error=None)
         except (audio.AudioError, structure.StructureError) as exc:
-            _update(job_id, status="error", error=str(exc), detail="Failed", retryable=False)
+            _fail(job_id, str(exc), False)
         except transcribe.TranscriptionError as exc:
-            _update(job_id, status="error", error=f"{exc} You can try again.", detail="Failed", retryable=True)
+            _fail(job_id, f"{exc} You can try again.", True)
         except Exception:  # unexpected: keep details out of the response
             keep_upload = True
-            _update(job_id, status="error", error="Something went wrong while processing this file. You can try again.",
-                    detail="Failed", retryable=True)
+            _fail(job_id, "Something went wrong while processing this file. You can try again.", True)
         finally:
             if not keep_upload:
                 src.unlink(missing_ok=True)
