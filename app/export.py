@@ -47,6 +47,8 @@ def to_markdown(job: dict, include_transcript: bool = False) -> str:
         lines += [f"*{meta}*", ""]
     if notes.get("summary"):
         lines += ["## Summary", "", notes["summary"], ""]
+    if notes.get("actions"):
+        lines += ["## Action items", ""] + [f"- [ ] {a}" for a in notes["actions"]] + [""]
     for sec in notes["sections"]:
         lines += [f"## {sec['heading']}", ""]
         lines += [f"- {b}" for b in sec["bullets"]]
@@ -67,6 +69,8 @@ def to_text(job: dict, include_transcript: bool = False) -> str:
     lines.append("")
     if notes.get("summary"):
         lines += ["SUMMARY", "", notes["summary"], ""]
+    if notes.get("actions"):
+        lines += ["ACTION ITEMS", ""] + [f"[ ] {a}" for a in notes["actions"]] + [""]
     for sec in notes["sections"]:
         lines += [sec["heading"], "-" * min(len(sec["heading"]), 72)]
         lines += [f"- {b}" for b in sec["bullets"]]
@@ -110,6 +114,7 @@ ROLE = {
 }
 
 PAGE_MARGIN = 20
+BOX_INDENT = 7
 MAX_VISUAL_MM = 175
 
 
@@ -267,6 +272,26 @@ def to_pdf(job: dict, include_transcript: bool = False) -> bytes:
         pdf.set_text_color(*INK)
         pdf.multi_cell(width - 2 * pad - 1, 6, t(notes["summary"]), align="L", new_x="LMARGIN", new_y="NEXT")
         pdf.set_y(y + box_h + 9)
+
+    # Action items with empty check boxes
+    if notes.get("actions"):
+        if pdf.will_page_break(30):
+            pdf.add_page()
+        label("Action items")
+        pdf.set_font(sans, size=10)
+        for a in notes["actions"]:
+            h = pdf.multi_cell(width - BOX_INDENT, 5.6, t(a), align="L", dry_run=True, output="HEIGHT")
+            if pdf.will_page_break(h):
+                pdf.add_page()
+            y = pdf.get_y()
+            pdf.set_draw_color(*ACCENT)
+            pdf.set_line_width(0.35)
+            pdf.rect(left + 0.2, y + 0.9, 3.4, 3.4, style="D", round_corners=True, corner_radius=0.6)
+            pdf.set_text_color(*INK)
+            pdf.set_xy(left + BOX_INDENT, y)
+            pdf.multi_cell(width - BOX_INDENT, 5.6, t(a), align="L", new_x="LMARGIN", new_y="NEXT")
+            pdf.ln(1.2)
+        pdf.ln(7)
 
     # Diagrams
     vis_list = visuals.build_visuals(notes)

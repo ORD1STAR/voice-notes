@@ -151,3 +151,24 @@ def test_transcript_is_split_into_paragraphs_in_text_exports():
     assert body.count("\n\n") >= 2
     txt = export.to_text(job, include_transcript=True)
     assert txt.split("TRANSCRIPT", 1)[1].strip().count("\n\n") >= 2
+
+
+# ------------------------------------------------------------ action items
+
+def action_job():
+    return {**JOB, "notes": {**JOB["notes"], "actions": ["Call Anna about the delivery", "Order the seeds"]}}
+
+
+def test_actions_appear_as_task_lists_in_text_exports():
+    md = export.to_markdown(action_job())
+    assert "## Action items\n\n- [ ] Call Anna about the delivery\n- [ ] Order the seeds" in md
+    assert md.index("## Summary") < md.index("## Action items") < md.index("## Website")
+    txt = export.to_text(action_job())
+    assert "ACTION ITEMS\n\n[ ] Call Anna about the delivery\n[ ] Order the seeds" in txt
+    assert "Action items" not in export.to_markdown(JOB)
+
+
+def test_pdf_with_actions_is_valid_and_longer():
+    with_actions = export.to_pdf(action_job())
+    assert with_actions.startswith(b"%PDF-") and with_actions.rstrip().endswith(b"%%EOF")
+    assert len(with_actions) > len(export.to_pdf(JOB))
