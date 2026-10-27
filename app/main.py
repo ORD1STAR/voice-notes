@@ -8,7 +8,7 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
-from . import audio, export, jobs, structure
+from . import audio, export, jobs, structure, visuals
 from .config import settings
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -25,8 +25,43 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Voice Notes", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
+SECURITY_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "DENY",
+    "Content-Security-Policy": (
+        "default-src 'self'; img-src 'self' data:; media-src 'self' blob:; style-src 'self'; "
+        "script-src 'self'; font-src 'self'; connect-src 'self'; object-src 'none'; "
+        "base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    ),
+}
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    response = await call_next(request)
+    for name, value in SECURITY_HEADERS.items():
+        response.headers.setdefault(name, value)
+    path = request.url.path
+    if path.startswith("/fonts/"):
+        response.headers.setdefault("Cache-Control", "public, max-age=604800")
+    elif not path.startswith("/api/"):
+        # Pages, scripts and styles are revalidated on every load, so an update never meets a stale file.
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
 def _public(job: dict) -> dict:
-    return {k: v for k, v in job.items()}
+    """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
+    out = dict(job)
+    if job.get("status") == "done" and job.get("notes"):
+        out["visuals"] = visuals.build_visuals(job["notes"])
+        out["transcript_paragraphs"] = structure.paragraphs(job.get("transcript") or "")
+    else:
+        out["transcript"] = None
+        out["visuals"] = []
+        out["transcript_paragraphs"] = []
+    return out
 
 
 @app.get("/api/health")
@@ -105,10 +140,13 @@ def export_note(job_id: str, format: str = "md", transcript: bool = False):
         raise HTTPException(409, "This note is not ready yet.")
     content, mime = export.render(job, format, include_transcript=transcript)
     filename = export.safe_filename(job["notes"]["title"], format)
+    ascii_name = filename.encode("ascii", "ignore").decode()
+    if not ascii_name or ascii_name.startswith("."):
+        ascii_name = f"note.{format}"
     return Response(
         content,
         media_type=mime,
-        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+        headers={"Content-Disposition": f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"},
     )
 
 

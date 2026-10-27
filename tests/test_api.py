@@ -156,3 +156,66 @@ def test_jobs_survive_restart(client, make_audio, fake_groq):
     job_id = wait_done(client, upload(client, make_audio(3)).json()["id"])["id"]
     jobs.load_all()
     assert jobs.get(job_id)["status"] == "done"
+
+
+def test_security_headers_and_download_name(client):
+    r = client.get("/")
+    assert r.headers["x-content-type-options"] == "nosniff"
+    assert "default-src 'self'" in r.headers["content-security-policy"]
+    assert "frame-ancestors 'none'" in r.headers["content-security-policy"]
+
+
+def test_favicon_and_fonts_are_served(client):
+    assert client.get("/favicon.svg").status_code == 200
+    f = client.get("/fonts/InstrumentSans-latin.woff2")
+    assert f.status_code == 200 and f.content[:4] == b"wOF2"
+
+
+def test_pending_job_hides_transcript_and_done_job_has_visuals(client):
+    from app import jobs
+
+    pending = jobs.new_job("x.wav")
+    body = client.get(f"/api/notes/{pending['id']}").json()
+    assert body["transcript"] is None and body["visuals"] == []
+
+    done = jobs.new_job("y.wav")
+    from fakes import RICH_NOTES
+
+    jobs._update(done["id"], status="done", stage="done", notes=RICH_NOTES, transcript="One. Two. Three.", engine="rule-based")
+    body = client.get(f"/api/notes/{done['id']}").json()
+    assert {v["kind"] for v in body["visuals"]} == {"mindmap", "flow", "chart"}
+    for v in body["visuals"]:
+        assert set(v["layouts"]) == {"wide", "narrow"}
+    assert body["transcript_paragraphs"] == ["One. Two. Three."]
+    pdf = client.get(f"/api/notes/{done['id']}/export?format=pdf")
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF-")
+    cd = pdf.headers["content-disposition"]
+    assert 'filename="quarterly-launch-plan.pdf"' in cd and "filename*=UTF-8''quarterly-launch-plan.pdf" in cd
+
+
+def test_download_name_for_non_latin_title(client):
+    from app import jobs
+
+    job = jobs.new_job("z.wav")
+    notes = {"title": "\u65e5\u672c\u8a9e", "summary": "", "sections": [{"heading": "h", "bullets": ["b"]}]}
+    jobs._update(job["id"], status="done", stage="done", notes=notes, transcript="t", engine="rule-based")
+    cd = client.get(f"/api/notes/{job['id']}/export?format=md").headers["content-disposition"]
+    assert 'filename="note.md"' in cd
+
+
+def test_note_deleted_while_queued_is_not_processed(monkeypatch, tmp_path):
+    from app import audio, jobs
+
+    job = jobs.new_job("gone.wav")
+    assert jobs.delete(job["id"])
+    called = []
+    monkeypatch.setattr(audio, "probe_duration", lambda p: called.append(p) or 1.0)
+    jobs.run(job["id"])
+    assert called == []
+    assert not (tmp_path / "data" / "jobs" / job["id"]).exists()
+
+
+def test_static_files_are_revalidated_but_fonts_are_cached(client):
+    assert client.get("/style.css").headers["cache-control"] == "no-cache"
+    assert client.get("/app.js").headers["cache-control"] == "no-cache"
+    assert "max-age" in client.get("/fonts/InstrumentSans-latin.woff2").headers["cache-control"]

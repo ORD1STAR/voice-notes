@@ -115,6 +115,8 @@ def start(job_id: str) -> threading.Thread:
 def run(job_id: str) -> None:
     """Pipeline: convert and split, transcribe, structure. Never raises."""
     with _worker_slot:
+        if get(job_id) is None:  # deleted while it was waiting in the queue
+            return
         src = upload_path(job_id)
         work = _job_dir(job_id) / "chunks"
         try:
