@@ -1,6 +1,7 @@
 """Transcription through the Groq Whisper API."""
 import re
 import time
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Callable
 
@@ -13,10 +14,44 @@ class TranscriptionError(Exception):
     """Raised with a message that is safe to show to the user."""
 
 
-def join_transcripts(parts: list[str]) -> str:
-    """Join chunk transcripts into one text, dropping empty parts."""
-    cleaned = [re.sub(r"\s+", " ", p).strip() for p in parts]
-    return " ".join(p for p in cleaned if p)
+def _norm(word: str) -> str:
+    return re.sub(r"[\W_]+", "", word.lower())
+
+
+def merge_overlap(previous: str, following: str, window: int = 14) -> str:
+    """Remove from `following` the words it repeats from the end of `previous`.
+
+    Used when a chunk was started a little early, so that the words around the cut appear in
+    both transcripts. The match is fuzzy because the two passes over the same speech do not
+    always write it identically. Without a convincing match the text is returned unchanged.
+    """
+    a, b = previous.split(), following.split()
+    if not a or not b:
+        return following
+    tail, head = [_norm(w) for w in a[-window:]], [_norm(w) for w in b[:window]]
+    m = SequenceMatcher(None, tail, head, autojunk=False).find_longest_match(0, len(tail), 0, len(head))
+    chars = sum(len(w) for w in head[m.b:m.b + m.size])
+    near_start = m.b <= 3 and m.a + m.size >= len(tail) - 3
+    if m.size >= 3 and near_start or m.size >= 2 and chars >= 8 and m.b <= 2 and m.a + m.size >= len(tail) - 2:
+        return " ".join(b[m.b + m.size:])
+    return following
+
+
+def join_transcripts(parts: list[str], overlaps: list[float] | None = None) -> str:
+    """Join chunk transcripts into one text, dropping empty parts.
+
+    `overlaps[i]` is how many seconds chunk i repeats from the chunk before it. Where it is
+    above zero, words repeated at the seam are removed.
+    """
+    out = ""
+    for i, p in enumerate(parts):
+        text = re.sub(r"\s+", " ", p).strip()
+        if not text:
+            continue
+        if out and overlaps and i < len(overlaps) and overlaps[i] > 0:
+            text = merge_overlap(out, text)
+        out = f"{out} {text}".strip() if text else out
+    return out
 
 
 def _retry_delay(resp: httpx.Response, attempt: int) -> float:
@@ -85,6 +120,7 @@ def transcribe_chunks(
     chunks: list[Path],
     on_progress: Callable[[int, int], None] | None = None,
     client: httpx.Client | None = None,
+    overlaps: list[float] | None = None,
 ) -> str:
     parts = []
     for i, chunk in enumerate(chunks):
@@ -93,4 +129,4 @@ def transcribe_chunks(
         parts.append(transcribe_file(chunk, client=client))
     if on_progress:
         on_progress(len(chunks), len(chunks))
-    return join_transcripts(parts)
+    return join_transcripts(parts, overlaps)

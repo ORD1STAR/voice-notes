@@ -88,3 +88,56 @@ def test_transcribe_chunks_joins_in_order_and_reports_progress(tmp_path):
     out = transcribe.transcribe_chunks(files, lambda d, t: progress.append((d, t)), client=client)
     assert out == "one two three"
     assert progress[0] == (0, 3) and progress[-1] == (3, 3)
+
+
+# ------------------------------------------------ joining at a chunk boundary
+
+def test_merge_overlap_removes_the_repeated_words():
+    a = "We will finish the landing page by"
+    b = "landing page by Friday and then send the copy."
+    assert transcribe.merge_overlap(a, b) == "Friday and then send the copy."
+
+
+def test_merge_overlap_is_fuzzy_about_punctuation_and_case():
+    a = "the newsletter goes out. Marketing needs the final copy, before"
+    b = "Final copy before the end of the week."
+    assert transcribe.merge_overlap(a, b) == "the end of the week."
+
+
+def test_merge_overlap_handles_a_word_that_was_cut():
+    # The first pass heard "landi", the second heard the whole word.
+    a = "Design will finish the landing page, then"
+    b = "page, then the copy arrives."
+    assert transcribe.merge_overlap(a, b) == "the copy arrives."
+
+
+def test_merge_overlap_leaves_unrelated_text_alone():
+    a = "That was the first part of the story."
+    b = "Now the second part begins with something new."
+    assert transcribe.merge_overlap(a, b) == b
+
+
+def test_merge_overlap_ignores_a_match_far_from_the_seam():
+    a = "the budget stays the same and we move on to other things entirely now"
+    b = "something else then the budget stays the same later"
+    assert transcribe.merge_overlap(a, b) == b
+
+
+def test_join_removes_repeats_only_where_the_chunk_overlapped():
+    parts = ["We will finish the landing page by", "landing page by Friday.", "Friday. Then we rest."]
+    # The third chunk did not repeat anything, so "Friday." there is real speech and stays.
+    assert transcribe.join_transcripts(parts, [0, 2.0, 0.0]) == "We will finish the landing page by Friday. Friday. Then we rest."
+    # No overlap information: nothing is touched.
+    assert transcribe.join_transcripts(parts) == "We will finish the landing page by landing page by Friday. Friday. Then we rest."
+
+
+def test_transcribe_chunks_passes_overlaps(tmp_path):
+    files = []
+    for i in range(2):
+        p = tmp_path / f"c{i}.mp3"
+        p.write_bytes(b"x")
+        files.append(p)
+    texts = iter(["we need to call Anna about the", "call Anna about the garden"])
+    client = make_client(lambda r: httpx.Response(200, json={"text": next(texts)}))
+    out = transcribe.transcribe_chunks(files, client=client, overlaps=[0, 2.0])
+    assert out == "we need to call Anna about the garden"

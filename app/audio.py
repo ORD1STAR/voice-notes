@@ -6,6 +6,10 @@ from pathlib import Path
 
 from .config import AUDIO_BITRATE, AUDIO_RATE, settings
 
+# When a chunk has to start in the middle of speech, it starts this many seconds early.
+# The repeated words are removed again when the transcripts are joined.
+OVERLAP_SECONDS = 2.0
+
 
 class AudioError(Exception):
     """Raised when a file cannot be read or converted. The message is safe to show."""
@@ -99,6 +103,75 @@ def plan_chunks(duration: float, seg: int) -> list[tuple[float, float]]:
     return out
 
 
+# ------------------------------------------------------- cutting in quiet places
+
+_SILENCE = re.compile(r"silence_(start|end):\s*(-?\d+(?:\.\d+)?)")
+
+
+def parse_silences(stderr: str) -> list[tuple[float, float]]:
+    """Read (start, end) pairs from the output of ffmpeg's silencedetect filter."""
+    out: list[tuple[float, float]] = []
+    start = None
+    for kind, value in _SILENCE.findall(stderr):
+        t = max(float(value), 0.0)
+        if kind == "start":
+            start = t
+        elif start is not None:
+            out.append((start, t))
+            start = None
+    return out
+
+
+def detect_silences(src: Path, min_length: float = 0.3) -> list[tuple[float, float]]:
+    """Find the quiet gaps in a recording. Returns [] when they cannot be found."""
+    cmd = [settings.ffmpeg, "-hide_banner", "-nostats", "-i", str(src), "-vn",
+           "-af", f"silencedetect=noise=-32dB:d={min_length}", "-f", "null", "-"]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=1800, errors="replace")
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    return parse_silences(r.stderr)
+
+
+def plan_cuts(
+    duration: float,
+    seg: int,
+    silences: list[tuple[float, float]] | None = None,
+    window: float | None = None,
+    overlap: float = OVERLAP_SECONDS,
+) -> list[tuple[float, float, float]]:
+    """Return (start, length, overlap) triples that cover the whole duration.
+
+    A chunk normally ends at the quiet gap closest to (and before) the target length, so no word
+    is cut in two. When there is no gap within the search window the chunk is cut at the target
+    and the next chunk starts `overlap` seconds early; the second value of the triple then
+    includes those seconds and the third tells the transcript join to remove repeated words.
+    """
+    if duration <= 0 or seg <= 0:
+        return []
+    silences = silences or []
+    window = min(45.0, seg * 0.3) if window is None else window
+    cuts: list[tuple[float, bool]] = []  # (time of the cut, was it a hard cut)
+    pos = 0.0
+    while duration - pos > seg + 0.01:
+        target = pos + seg
+        low = max(pos + seg * 0.5, target - window)
+        mids = [(s + e) / 2 for s, e in silences if low <= (s + e) / 2 <= target]
+        if mids:
+            cut, hard = max(mids), False
+        else:
+            cut, hard = target, True
+        cuts.append((cut, hard))
+        pos = cut
+    plan = []
+    start, lead = 0.0, 0.0
+    for cut, hard in cuts + [(duration, False)]:
+        plan.append((max(start - lead, 0.0), cut - start + lead, lead))
+        start = cut
+        lead = overlap if hard else 0.0
+    return plan
+
+
 def _encode(src: Path, dst: Path, start: float, length: float | None) -> None:
     cmd = [settings.ffmpeg, "-y", "-v", "error"]
     if start:
@@ -117,19 +190,30 @@ def _encode(src: Path, dst: Path, start: float, length: float | None) -> None:
         raise AudioError("The audio could not be converted.")
 
 
-def split_audio(src: Path, workdir: Path, duration: float | None = None) -> list[Path]:
-    """Convert to small mono MP3 chunks, each well under the Groq size limit."""
+def split_audio_ex(src: Path, workdir: Path, duration: float | None = None) -> tuple[list[Path], list[float]]:
+    """Convert to small mono MP3 chunks, each well under the Groq size limit.
+
+    Returns the chunk files and, for each, how many seconds it repeats from the chunk before.
+    """
     workdir.mkdir(parents=True, exist_ok=True)
     duration = duration or probe_duration(src)
     seg = segment_seconds()
+    silences = detect_silences(src) if duration > seg + 0.01 else []
     paths: list[Path] = []
-    for i, (start, length) in enumerate(plan_chunks(duration, seg)):
+    overlaps: list[float] = []
+    for i, (start, length, lead) in enumerate(plan_cuts(duration, seg, silences)):
         dst = workdir / f"chunk_{i:04d}.mp3"
         _encode(src, dst, start, length)
         if dst.stat().st_size > settings.max_chunk_bytes:
             raise AudioError("An audio chunk is larger than the transcription limit.")
         if dst.stat().st_size > 0:
             paths.append(dst)
+            overlaps.append(lead)
     if not paths:
         raise AudioError("No audio could be extracted from this file.")
-    return paths
+    return paths, overlaps
+
+
+def split_audio(src: Path, workdir: Path, duration: float | None = None) -> list[Path]:
+    """Same as split_audio_ex, for callers that only need the files."""
+    return split_audio_ex(src, workdir, duration)[0]

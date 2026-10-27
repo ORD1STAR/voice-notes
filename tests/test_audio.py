@@ -63,8 +63,9 @@ def test_split_audio_makes_small_ordered_chunks(make_audio, tmp_path, monkeypatc
     for c in chunks:
         assert c.stat().st_size < 25 * 1024 * 1024
         assert c.suffix == ".mp3"
+    # Without a quiet gap near the cut, each later chunk starts 2 seconds early to repeat the words around it.
     total = sum(audio.probe_duration(c) for c in chunks)
-    assert total == pytest.approx(25, abs=1.5)
+    assert total == pytest.approx(25 + 2 * audio.OVERLAP_SECONDS, abs=1.5)
 
 
 @needs_ffmpeg
@@ -88,3 +89,57 @@ def test_browser_style_webm_without_duration_is_measured(tmp_path, make_audio):
     info = subprocess.run([FFMPEG, "-hide_banner", "-i", str(out)], capture_output=True, text=True).stderr
     assert "Duration: N/A" in info
     assert 3.0 < audio.probe_duration(out) < 5.5
+
+
+# ------------------------------------------------- chunk boundaries and words
+
+def test_parse_silences_pairs_starts_and_ends():
+    text = ("[silencedetect @ 0x1] silence_start: 8.5\n[silencedetect @ 0x1] silence_end: 9.5 | silence_duration: 1\n"
+            "[silencedetect @ 0x1] silence_start: -0.01\n[silencedetect @ 0x1] silence_end: 0.4 | silence_duration: 0.4\n"
+            "[silencedetect @ 0x1] silence_start: 30.0\n")
+    assert audio.parse_silences(text) == [(8.5, 9.5), (0.0, 0.4)]  # an unfinished gap at the end is ignored
+
+
+def test_plan_cuts_prefers_a_quiet_gap_near_the_target():
+    plan = audio.plan_cuts(25.0, 10, [(1.0, 1.5), (8.5, 9.5), (15.0, 15.4)])
+    assert plan[0] == pytest.approx((0.0, 9.0, 0.0))
+    assert plan[1][2] == 0.0  # cut in silence: no repeated seconds
+    assert sum(1 for _ in plan) == 3
+    ends = [s + length - lead * 0 for s, length, lead in plan]
+    assert ends[-1] == pytest.approx(25.0)
+
+
+def test_plan_cuts_without_a_gap_cuts_hard_and_overlaps():
+    plan = audio.plan_cuts(25.0, 10, [])
+    assert [round(s, 1) for s, _, _ in plan] == [0.0, 8.0, 18.0]
+    assert [lead for _, _, lead in plan] == [0.0, 2.0, 2.0]
+    # every second of the recording is still covered, and chunks stay close to the target length
+    assert plan[0][0] == 0 and plan[-1][0] + plan[-1][1] == pytest.approx(25.0)
+    assert all(length <= 10 + 2 + 0.01 for _, length, _ in plan)
+
+
+def test_plan_cuts_ignores_gaps_that_are_too_early_in_the_chunk():
+    # A gap at 2 s would make a 2 second chunk; the search only looks in the last part of the chunk.
+    plan = audio.plan_cuts(25.0, 10, [(1.9, 2.1)])
+    assert plan[0][1] == pytest.approx(10.0)
+
+
+def test_plan_cuts_short_and_empty():
+    assert audio.plan_cuts(4.0, 10, []) == [(0.0, 4.0, 0.0)]
+    assert audio.plan_cuts(0, 10) == []
+
+
+@needs_ffmpeg
+def test_split_cuts_in_the_quiet_gap(tmp_path, monkeypatch):
+    import subprocess
+
+    from conftest import FFMPEG
+
+    monkeypatch.setenv("CHUNK_SECONDS", "10")
+    src = tmp_path / "speech-like.wav"
+    subprocess.run([FFMPEG, "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+                    "-af", "volume=enable='between(t,8.5,9.5)':volume=0", str(src)], check=True)
+    assert audio.detect_silences(src)[0][0] == pytest.approx(8.5, abs=0.15)
+    chunks, overlaps = audio.split_audio_ex(src, tmp_path / "out")
+    assert overlaps[1] == 0.0
+    assert audio.probe_duration(chunks[0]) == pytest.approx(9.0, abs=0.3)
