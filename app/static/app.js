@@ -601,6 +601,17 @@
     return "Structured with rules";
   }
 
+  // About 200 words a minute; texts written without spaces are counted by character.
+  function readingTime(n) {
+    var parts = [n.summary || ""].concat(n.key_points || [], n.actions || []);
+    n.sections.forEach(function (s) { parts.push(s.heading); parts = parts.concat(s.bullets); });
+    var text = parts.join(" ");
+    var words = (text.match(/\S+/g) || []).length;
+    var cjk = (text.match(/[\u3040-\u30ff\u3400-\u9fff]/g) || []).length;
+    var minutes = Math.max(1, Math.round(cjk > words ? cjk / 450 : words / 200));
+    return minutes + " min read";
+  }
+
   function renderResult(job) {
     currentJob = job;
     if (editing) setEditing(false);
@@ -611,7 +622,7 @@
     var language = "Language: " + (job.language_name || "Auto");
     var meta = $("result-meta");
     meta.textContent = "";
-    [job.filename, fmtDuration(job.duration), fmtDate(job.created), language, engine, job.edited ? "Edited by you" : ""].filter(Boolean).forEach(function (b) {
+    [job.filename, fmtDuration(job.duration), readingTime(n), fmtDate(job.created), language, engine, job.edited ? "Edited by you" : ""].filter(Boolean).forEach(function (b) {
       meta.appendChild(el("li", b));
     });
     $("summary").textContent = n.summary;
@@ -634,6 +645,7 @@
       host.appendChild(sec);
     });
     engineNote(job);
+    renderOutline();
 
     var tr = $("transcript");
     tr.textContent = "";
@@ -1161,6 +1173,7 @@
     return api(url).then(function (r) { return r.json(); }).then(function (items) {
       if (ticket !== listRequest) return; // a newer search is already on its way
       lastItems = items;
+      $("backup").hidden = !items.some(function (i) { return i.status === "done"; });
       var shown = items.slice(0, 60);
       fillList($("recent-list"), $("recent-empty"), shown);
       fillList($("side-list"), $("side-empty"), shown);
@@ -1290,6 +1303,94 @@
     if (document.hidden) return;
     if (pendingSeen && pendingSeen === currentId && !views.result.hidden) markSeen(pendingSeen);
     else loadRecent();
+  });
+
+  /* ---------- outline of a long note, back to top, keyboard shortcuts ---------- */
+
+  var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)");
+  function scrollBehavior() { return reduceMotion && reduceMotion.matches ? "auto" : "smooth"; }
+
+  // A note with three or more sections gets a row of jump links to its parts.
+  function renderOutline() {
+    var host = $("outline-list");
+    host.textContent = "";
+    var targets = [];
+    [["summary-block", "Summary"], ["keypoints-block", "Key points"], ["actions-block", "Action items"],
+     ["glance", "At a glance"]].forEach(function (p) {
+      var e = $(p[0]);
+      if (e && !e.hidden) targets.push({ node: e, label: p[1] });
+    });
+    var sections = $("sections").children;
+    Array.prototype.forEach.call(sections, function (sec, i) {
+      var h = sec.querySelector("h3");
+      targets.push({ node: sec, label: h ? h.textContent : "Section " + (i + 1) });
+    });
+    $("outline").hidden = sections.length < 3;
+    if (sections.length < 3) return;
+    targets.forEach(function (t) {
+      var li = el("li");
+      var b = el("button", t.label, "chip");
+      b.type = "button";
+      b.setAttribute("dir", "auto");
+      b.addEventListener("click", function () {
+        t.node.setAttribute("tabindex", "-1");
+        t.node.scrollIntoView({ behavior: scrollBehavior(), block: "start" });
+        t.node.focus({ preventScroll: true });
+      });
+      li.appendChild(b);
+      host.appendChild(li);
+    });
+  }
+
+  var topTicking = false;
+  function updateTop() {
+    topTicking = false;
+    $("to-top").hidden = !(window.scrollY > 900 && !views.result.hidden);
+  }
+  window.addEventListener("scroll", function () {
+    if (!topTicking) { topTicking = true; window.requestAnimationFrame(updateTop); }
+  }, { passive: true });
+  $("to-top").addEventListener("click", function () {
+    window.scrollTo({ top: 0, behavior: scrollBehavior() });
+    $("result-title").focus({ preventScroll: true });
+  });
+
+  var keysDialog = $("keys");
+  function openKeys() { if (!keysDialog.open) keysDialog.showModal(); }
+  $("keys-open").addEventListener("click", openKeys);
+
+  function typingIn(t) {
+    return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));
+  }
+  function moveNote(step) {
+    var done = lastItems.filter(function (i) { return i.status === "done"; });
+    if (!done.length) return;
+    var at = -1;
+    done.forEach(function (i, k) { if (i.id === currentId) at = k; });
+    var next = at < 0 ? (step > 0 ? 0 : done.length - 1) : at + step;
+    if (next < 0 || next >= done.length) return;
+    location.hash = "#/note/" + done[next].id;
+  }
+  document.addEventListener("keydown", function (e) {
+    if (e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || typingIn(e.target)) return;
+    if (document.querySelector("dialog[open]")) return;
+    var k = e.key;
+    if (k === "?") { e.preventDefault(); openKeys(); return; }
+    if (focusMode) return;
+    if (k === "/") {
+      var box = $("search").offsetParent !== null ? $("search") : $("search-recent");
+      if (box.offsetParent === null) return;
+      e.preventDefault();
+      box.focus();
+      box.select();
+    } else if (k === "n") {
+      if (location.hash && location.hash !== "#/") location.hash = "#/";
+    } else if (k === "j" || k === "k") {
+      moveNote(k === "j" ? 1 : -1);
+    } else if (k === "e") {
+      var edit = $("edit-notes");
+      if (!views.result.hidden && !editing && edit.offsetParent !== null) { e.preventDefault(); edit.click(); }
+    }
   });
 
   setupRecorder();

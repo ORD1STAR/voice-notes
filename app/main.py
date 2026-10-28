@@ -1,7 +1,9 @@
 """FastAPI application: upload, status, export."""
+import io
 import logging
 import re
 import time
+import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
@@ -62,8 +64,16 @@ async def security_headers(request: Request, call_next):
     return response
 
 
+def _clean(job: dict) -> dict:
+    """The job with spoken framing taken out of notes written by an engine. Notes the reader edited are theirs."""
+    if job.get("status") != "done" or not job.get("notes") or job.get("edited"):
+        return job
+    return {**job, "notes": structure.unspoken_notes(job["notes"])}
+
+
 def _public(job: dict) -> dict:
     """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
+    job = _clean(job)
     out = dict(job)
     out["pdf_problem"] = export.pdf_problem(job) if job.get("status") == "done" and job.get("notes") else None
     out["language"] = languages.lenient(job.get("language"))  # notes saved before the language field are automatic
@@ -214,11 +224,40 @@ def delete_note(job_id: str):
     return Response(status_code=204)
 
 
+@app.get("/api/export/all")
+def export_all(format: str = "md", transcript: bool = False):
+    """A ZIP with one Markdown (or text) file per finished note, as a backup or to move the notes elsewhere."""
+    if format not in ("md", "txt"):
+        raise HTTPException(400, "Format must be txt or md.")
+    rows = [_clean(j) for j in jobs.done_jobs()]
+    if not rows:
+        raise HTTPException(404, "There are no finished notes yet.")
+    buffer = io.BytesIO()
+    used: set[str] = set()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        for job in rows:
+            content, _ = export.render(job, format, include_transcript=transcript)
+            day = time.strftime("%Y-%m-%d", time.localtime(job["created"]))
+            base = f"{day}-{export.safe_filename(job['notes']['title'], format)[: -len(format) - 1]}"
+            name, n = f"{base}.{format}", 2
+            while name in used:
+                name, n = f"{base}-{n}.{format}", n + 1
+            used.add(name)
+            archive.writestr(name, content)
+    stamp = time.strftime("%Y-%m-%d")
+    return Response(
+        buffer.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="voice-notes-{stamp}.zip"'},
+    )
+
+
 @app.get("/api/notes/{job_id}/export")
 def export_note(job_id: str, format: str = "md", transcript: bool = False):
     job = jobs.get(job_id)
     if not job:
         raise HTTPException(404, "This note does not exist.")
+    job = _clean(job)
     if format not in export.FORMATS:
         raise HTTPException(400, "Format must be pdf, txt or md.")
     if job["status"] != "done" or not job.get("notes"):

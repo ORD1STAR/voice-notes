@@ -20,7 +20,7 @@ from typing import Callable
 
 import httpx
 
-from . import languages
+from . import languages, speech
 from .config import settings
 
 log = logging.getLogger("voice_notes.structure")
@@ -173,12 +173,15 @@ def clean_sentence(text: str) -> str:
             s = hedged
         if s == before:
             break
+    s = speech.unspeak(s) if s else ""
+    s = speech.drop_fillers(s) if s else ""
     s = _INLINE_FILLER.sub(lambda m: "," if m.group(0).lstrip().startswith(", like") else " ", s)
     s = _TAG.sub("", s)
     s = _STUTTER.sub(r"\1", s)
     s = re.sub(r"\s+([,.;:!?])", r"\1", s)
     s = re.sub(r",\s*,", ",", s)
     s = re.sub(r"\s+", " ", s).strip(" ,;")
+    s = speech.unspeak(s).strip(" ,;") if s else ""
     if not s:
         return ""
     return s[0].upper() + s[1:]
@@ -923,6 +926,8 @@ SYSTEM_PROMPT = (
     "its topic (never \"Notes\", \"Details\", \"Introduction\" or \"Section 1\") and 2 to 6 bullets. Each bullet is one short, "
     "complete statement in your own words, without filler such as \"so\", \"I think\" or \"you know\". Do not repeat a "
     "point. Skip greetings, hesitations and remarks with no content.\n"
+    "- Write the subject itself, never the speaker's requests or talk to a listener: for \"Explain to me how X works\" "
+    "write \"How X works\". No \"in this note\", no \"as I said\".\n"
     "- When the speaker describes steps in order, keep the order and begin each bullet with First, Then, Next or Finally.\n"
     "- key_points: the 2 to 4 most important facts, decisions or deadlines of the whole text. An empty list when the text "
     "is short.\n"
@@ -1112,7 +1117,7 @@ def _ollama_chat(system: str, user: str, example=False) -> dict:
 
 def _clean_title(title: str) -> str:
     t = re.sub(r"^(?:title|titre|título)\s*:\s*", "", str(title or "").strip(), flags=re.IGNORECASE)
-    t = t.strip().strip("\"'").rstrip(".:;").strip()
+    t = speech.scrub(t.strip().strip("\"'")).rstrip(".:;").strip()
     if len(t.split()) > 10:
         t = short_phrase(t, 8)
     return t
@@ -1228,6 +1233,7 @@ def _tidy(text) -> str:
     """Light cleaning for text written by a strong model: spacing, bullet marks and the first letter."""
     s = re.sub(r"\s+", " ", str(text or "")).strip()
     s = re.sub(r"^(?:(?:[\-\*•]|\[[ xX]?\])\s*)+", "", s)
+    s = speech.scrub(s)
     return s[:1].upper() + s[1:] if s else ""
 
 
@@ -1392,6 +1398,7 @@ def _structure_pieces(
     on_progress: Callable[..., None] | None = None,
     review: Callable[[dict, str], dict] | None = None,
     final: Callable[[str, list[str], list[str]], dict] | None = None,
+    polish: Callable[[dict], dict] | None = None,
 ) -> tuple[dict, int]:
     """Structure a transcript piece by piece with a model. Returns (notes, number of pieces done by the rules).
 
@@ -1415,9 +1422,23 @@ def _structure_pieces(
     n = len(pieces)
     notify = _notifier(on_progress)
     steps = 2 * n if review else n
-    total = steps + (1 if review and n > 1 else 0)
+    total = steps + (1 if review and n > 1 else 0) + (1 if polish else 0)
     results: list[dict] = []
     fallback_pieces = 0
+
+    def polished(notes: dict) -> dict:
+        """The last editing pass on the wording of the finished note. A pass that fails keeps the notes as they are."""
+        if polish is None or fallback_pieces >= n:
+            return notes
+        notify(total - 1, total, "polishing the wording")
+        try:
+            return polish(notes) or notes
+        except (StructureError, ValueError, TypeError, KeyError, AttributeError) as exc:
+            log.info("final editing pass skipped, the notes are kept (%s)", exc)
+            return notes
+        finally:
+            notify(total, total)
+
     streak = 0
     review_misses = 0
     last_error = ""
@@ -1451,7 +1472,7 @@ def _structure_pieces(
     if not results or fallback_pieces == n:
         raise StructureError(last_error or "the model produced no usable notes")
     if len(results) == 1:
-        return results[0], fallback_pieces
+        return polished(results[0]), fallback_pieces
     sections: list[dict] = []
     for r in results:
         for sec in r["sections"]:
@@ -1487,10 +1508,11 @@ def _structure_pieces(
         title = structure_rules(text)["title"]
     if not summary:
         summary = _digest_summary(results) or structure_rules(text)["summary"]
-    if total > steps:
+    merged = {"title": _clip(title, 100), "summary": summary, "key_points": key_points,
+              "sections": sections[:30], "actions": actions}
+    if polish is None and total > steps:
         notify(total, total)
-    return {"title": _clip(title, 100), "summary": summary, "key_points": key_points,
-            "sections": sections[:30], "actions": actions}, fallback_pieces
+    return polished(merged), fallback_pieces
 
 
 def ollama_system_prompt(language: str = "auto") -> str:
@@ -1574,7 +1596,8 @@ def groq_status() -> dict:
         return {"enabled": False, "model": model, "reason": "disabled"}
     if not settings.groq_api_key:
         return {"enabled": False, "model": model, "reason": "no key"}
-    return {"enabled": True, "model": model, "reason": "", "review": settings.groq_review}
+    return {"enabled": True, "model": model, "reason": "", "review": settings.groq_review,
+            "polish": settings.groq_polish}
 
 
 GROQ_SYSTEM_PROMPT = (
@@ -1593,6 +1616,13 @@ GROQ_SYSTEM_PROMPT = (
     "filler such as \"I think\" or \"I want to say\", no \"the speaker says\", do not address the speaker and do "
     "not describe the recording itself. When the speaker is unsure, say so with a word like \"probably\" or "
     "\"possibly\". When several people are named, say who decided, said or owns what.\n"
+    "- The notes are a written document about the subject, not a record of the recording. When the speaker talks to "
+    "a listener or to an assistant (\"explain to me how X works\", \"tell me about X\", \"can you check X\", "
+    "\"listen\", \"voila\", \"as I said\", \"explique moi ...\"), keep only the subject and write the topic or "
+    "the question itself (\"How X works\"), never the request. Nothing may only make sense when heard: no \"in this "
+    "note\", \"let us see\", \"as I said\", no question to the listener and no remark about the recording. Replace "
+    "\"this\", \"that\", \"it\" and \"they\" by the noun they stand for, so that every bullet can be understood "
+    "alone.\n"
     "Return one JSON object with exactly these keys:\n"
     "- \"title\": 2 to 8 words naming the topic. Not a sentence, no full stop.\n"
     "- \"summary\": 2 to 4 sentences saying what the note is about and what was decided or concluded.\n"
@@ -1624,6 +1654,11 @@ GROQ_REVIEW_PROMPT = (
     "\"Overview\", \"Introduction\", \"Other\").\n"
     "- An action item starts with a verb. It names the owner and the deadline only when the speaker said them; "
     "never guess either.\n"
+    "- Remove every trace of speech. A request to a listener or an assistant (\"explain to me how X works\", "
+    "\"tell me about X\", \"explique moi ...\", \"can you ...\") becomes the topic or the question itself (\"How X "
+    "works\"). Delete \"in this note\", \"as I said\", \"let us see\", greetings, questions to the listener and "
+    "remarks about the recording. A bullet must be understandable alone: replace \"this\", \"that\" and \"it\" by "
+    "the noun they stand for.\n"
     "- Keep the order of the speaker.\n"
     "- Never invent anything. Every name, number and date must come from the transcript, written as it was said.\n"
     "- {language_rule}\n"
@@ -1632,6 +1667,41 @@ GROQ_REVIEW_PROMPT = (
     "(a list of objects with \"heading\" and \"bullets\") and \"action_items\".\n"
     "Answer with the JSON object only."
 )
+
+
+GROQ_POLISH_PROMPT = (
+    "You are the final editor of notes that were made from a spoken voice note. You receive the notes as JSON, "
+    "usually with the transcript. The notes will be read, shared and printed as a document by people who never heard "
+    "the recording. Your only job is the wording and the order: every fact stays.\n"
+    "Rules:\n"
+    "- The result must read like notes written by a careful person at a desk, not like a summary of a voice message.\n"
+    "- Remove every trace of speech: requests to a listener or an assistant (\"explain to me how X works\", \"tell "
+    "me about X\", \"explique moi ...\", \"can you ...\") become the topic or the question itself (\"How X works\"); "
+    "delete \"in this note\", \"as I said\", \"let us see\", greetings, questions to the listener, the speaker as a "
+    "person (\"the speaker thinks\", \"I\", \"you\") and every remark about the recording.\n"
+    "- Every bullet is one complete sentence that can be understood alone: replace \"this\", \"that\", \"it\", "
+    "\"they\" and \"the latter\" by the noun they stand for. Use the same term for the same thing everywhere.\n"
+    "- The summary describes the subject and its outcome in 2 to 4 sentences. It never starts with \"This note\", "
+    "\"The speaker\" or \"The recording\".\n"
+    "- Headings are specific noun phrases of 1 to 5 words. Move a bullet to the section where it belongs, merge "
+    "sections about the same topic and keep a logical order (context, facts, decisions, next steps). Steps stay in "
+    "the order spoken.\n"
+    "- Key points are the 2 to 5 facts a reader must not miss and do not repeat the summary word for word. Action "
+    "items start with a verb and keep the owner and the deadline only when the transcript has them.\n"
+    "- Never drop a fact, a decision, a figure, a name, a date or a deadline, and never invent one. Every name, "
+    "number and date must be in the notes or the transcript exactly as given.\n"
+    "- {language_rule}\n"
+    "Return one JSON object with the keys \"title\", \"summary\", \"key_points\", \"sections\" (a list of objects "
+    "with \"heading\" and \"bullets\") and \"action_items\". Answer with the JSON object only."
+)
+
+
+def groq_polish_prompt(language: str = "auto") -> str:
+    return GROQ_POLISH_PROMPT.format(language_rule=_language_rule(language))
+
+
+# The whole transcript is shown to the final editor when it is not longer than this.
+POLISH_TRANSCRIPT_CHARS = 14000
 
 
 def _language_rule(language: str = "auto") -> str:
@@ -1885,6 +1955,26 @@ def structure_groq(
         raw = _groq_chat(model, groq_head_prompt(language), "\n\n".join(parts))
         return _validated_head(raw, text, lang)
 
+    polish_system = groq_polish_prompt(language)
+
+    def polish(notes: dict) -> dict:
+        shown = {"title": notes["title"], "summary": notes["summary"], "key_points": notes.get("key_points", []),
+                 "sections": notes["sections"], "action_items": notes.get("actions", [])}
+        parts = [label]
+        if len(text) <= POLISH_TRANSCRIPT_CHARS:
+            parts.append(f"Transcript:\n{text}")
+        else:
+            parts.append("The transcript is too long to show. Only change wording and order; add no fact.")
+        parts.append(f"Notes (JSON):\n{json.dumps(shown, ensure_ascii=False)}")
+        raw = normalize_notes(_groq_chat(model, polish_system, "\n\n".join(parts), optional=True))
+        kept = _bullet_count(raw)
+        edited = refine(raw, text)
+        if not _review_is_better(notes, edited, kept, lang, text):
+            return notes
+        if not edited.get("key_points"):
+            edited["key_points"] = notes.get("key_points", [])
+        return edited
+
     return _structure_pieces(
         text,
         GROQ_PIECE_CHARS,
@@ -1894,6 +1984,7 @@ def structure_groq(
         on_progress,
         review=review if settings.groq_review else None,
         final=final,
+        polish=polish if settings.groq_polish else None,
     )
 
 
@@ -1948,6 +2039,36 @@ def structure_transcript(
         report["fallback_reason"] = " ".join(r for r in reasons if r) + " The built-in rules were used."
     log.info("structuring engine used: rule-based")
     return structure_rules(text), "rule-based"
+
+
+def unspoken_notes(notes: dict) -> dict:
+    """The same notes without spoken framing ("Explique moi ...", "Listen, ...", "Voila.").
+
+    Notes written before the scrubber existed are cleaned when they are shown or exported, so nothing has to be
+    rebuilt. A text that is only framing is dropped; a section left empty goes with it. Notes that would be left
+    without any section are returned as they are.
+    """
+    if not notes or not notes.get("sections"):
+        return notes
+
+    def one(text) -> str:
+        return speech.scrub(str(text or "").strip())
+
+    sections = []
+    for sec in notes["sections"]:
+        bullets = [b for b in (one(b) for b in sec.get("bullets") or []) if b]
+        if bullets:
+            sections.append({**sec, "bullets": bullets})
+    if not sections:
+        return notes
+    out = {**notes, "sections": sections}
+    out["title"] = _clean_title(notes.get("title")) or notes.get("title") or ""
+    if "summary" in notes:
+        out["summary"] = one(notes.get("summary"))
+    for key in ("key_points", "actions"):
+        if key in notes:
+            out[key] = [t for t in (one(t) for t in notes.get(key) or []) if t]
+    return out
 
 
 def _with_extras(notes: dict, text: str) -> dict:

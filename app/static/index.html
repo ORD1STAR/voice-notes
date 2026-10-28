@@ -47,6 +47,7 @@
         <p class="sr-only" id="search-status" role="status" aria-live="polite"></p>
         <p class="empty" id="side-empty">Nothing here yet.</p>
         <ul class="note-list" id="side-list" hidden></ul>
+        <a class="backup" id="backup" href="/api/export/all?format=md" download hidden>Download all notes (ZIP)</a>
       </nav>
     </aside>
 
@@ -261,6 +262,10 @@
                 <button type="button" class="btn quiet" id="edit-cancel">Cancel</button>
               </div>
             </form>
+            <nav class="outline" id="outline" aria-labelledby="outline-label" hidden>
+              <p class="outline-label" id="outline-label">On this page</p>
+              <ul class="outline-list" id="outline-list"></ul>
+            </nav>
             <div class="summary" id="summary-block">
               <h2 class="eyebrow">Summary</h2>
               <p id="summary"></p>
@@ -295,6 +300,7 @@
 
       <footer class="foot">
         <p id="engine-line" aria-live="polite">Transcription by Groq Whisper. The notes are written by a language model.</p>
+        <p class="foot-keys"><button type="button" class="linkish" id="keys-open">Keyboard shortcuts</button></p>
       </footer>
     </div>
   </div>
@@ -309,6 +315,24 @@
       </div>
     </form>
   </dialog>
+
+  <dialog id="keys" aria-labelledby="keys-title">
+    <form method="dialog">
+      <h2 id="keys-title">Keyboard shortcuts</h2>
+      <dl class="keys-list">
+        <div><dt><kbd>/</kbd></dt><dd>Search your notes</dd></div>
+        <div><dt><kbd>n</kbd></dt><dd>Start a new note</dd></div>
+        <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Open the next or the previous note</dd></div>
+        <div><dt><kbd>e</kbd></dt><dd>Edit the open note</dd></div>
+        <div><dt><kbd>?</kbd></dt><dd>Show this list</dd></div>
+      </dl>
+      <div class="actions end">
+        <button type="submit" class="btn primary" id="keys-close">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <button type="button" class="to-top" id="to-top" hidden aria-label="Back to top">Top</button>
 
   <noscript><p class="notice">Voice Notes needs JavaScript to run.</p></noscript>
   <script src="/app.js"></script>

@@ -109,6 +109,13 @@ def get(job_id: str) -> dict | None:
         return dict(job) if job else None
 
 
+def done_jobs() -> list[dict]:
+    """Copies of the finished notes, newest first (used for the backup of all notes)."""
+    with _lock:
+        rows = [dict(j) for j in _jobs.values() if j.get("status") == "done" and j.get("notes")]
+    return sorted(rows, key=lambda j: j["created"], reverse=True)
+
+
 def queue_ahead(job_id: str) -> int:
     """How many notes that were added earlier are still waiting or being processed."""
     with _lock:

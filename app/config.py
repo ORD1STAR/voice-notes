@@ -86,6 +86,11 @@ class Settings:
         return os.environ.get("GROQ_REVIEW", "1").strip().lower() not in ("0", "false", "no", "off")
 
     @property
+    def groq_polish(self) -> bool:
+        """After the parts are merged, ask the chat model for a last editing pass on the wording of the whole note."""
+        return os.environ.get("GROQ_POLISH", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    @property
     def data_dir(self) -> Path:
         return Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 

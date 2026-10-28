@@ -29,6 +29,10 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 - A note that failed because of a temporary problem (the transcription service did not answer, the server restarted) can be tried again without uploading the file once more. The recording is kept for a week for that purpose, or until the note is deleted.
 - Share link: every finished note has a link (`/n/<id>`, the "Copy link" button next to the export buttons) that opens the note full screen, without the sidebar, the recorder or any editing control. It has the summary, key points, sections, actions, diagrams, the transcript tab and the PDF, Markdown and text exports, follows the light or dark setting and prints cleanly. A note that is still being made shows its progress there and turns into the note by itself. **The link is a secret address: anyone who has it can read the note (and download its exports), and there is no password.** Only put the app behind a network or a login you trust before you send links around. An unknown link shows "This note does not exist". The page is marked `noindex`.
 - Work goes on without the browser: once the upload has finished, the note is prepared on the server, so you can close the tab or switch to another note. The browser only asks for confirmation if you leave while the file is still being sent. A finished note you have not opened yet shows a light blue dot in the sidebar (and a count in the tab title); the dot goes away when you open the note, in the normal or the share view. A note you watched until it was done never gets a dot, and old notes are not marked. The list refreshes by itself while a note is being made, and when you come back to the tab. If the server restarts in the middle of a job, the note is shown as failed with a Try again button.
+- Notes that read like notes: a request to a listener ("Explique moi comment ca marche", "Tell me about the plan", "Can you check...") becomes the topic or the instruction itself, and "Listen,", "Voila", "In this note I will talk about..." and similar framing is removed, in every engine and also in notes saved before (they are cleaned when shown or exported, the saved file is not rewritten; notes you edited are left as you wrote them). Groq adds a last editing pass on the wording of the whole note. See "Notes that read like notes" below.
+- Outline: a note with three or more sections starts with a row of jump links (summary, key points, action items, diagrams and each section). A "Top" button appears when you have scrolled far. The details line shows the reading time.
+- Keyboard shortcuts: `/` search, `n` new note, `j` and `k` next and previous note, `e` edit the open note, `?` the list (the share view only has `?`).
+- Backup: "Download all notes (ZIP)" under the list of notes gives one Markdown file per finished note (the API also offers text files and the transcripts).
 - Keyboard friendly, works on phones, follows the system light or dark setting.
 - No build step: the frontend is plain HTML, CSS and JavaScript. The two typefaces (Instrument Sans and Instrument Serif) are bundled, so nothing is loaded from another site.
 
@@ -90,6 +94,14 @@ All three engines produce the same shape: title, summary, key points, sections w
 
 **Local model (when Groq is not used and Ollama is running with the model).** Each piece of about 3500 characters is sent with strict instructions and one worked example in the language of the recording (English or French; no example for other languages), at a low temperature. Nothing the model returns is trusted blindly: bullets, key points and actions whose words or numbers are not in the transcript are dropped, filler and empty remarks are removed, repeated points are merged, a generic title or heading ("Notes", "Details") is replaced by one from the rules, and tasks the model left out are added from the rules. A section that only lists tasks ("Action items", "Next steps") is dropped and its tasks go to the checklist, so they are not shown twice. If nothing usable is left, that piece falls back to the rules. The model is what gives rewritten, shorter bullets; the checks are what keep it honest. A 1.5B model is much weaker than the Groq model: expect plainer notes and now and then a part that falls back to the rules.
 
+### Notes that read like notes
+
+Three layers keep the speech out of the notes.
+
+1. **The prompts** (Groq writer, Groq reviewer, the local model) say that the notes are a document about the subject and not a record of the recording: a request to a listener or an assistant becomes the topic or the question itself ("How X works"), "in this note", "as I said" and questions to the listener are left out, and "this" or "it" is replaced by the noun so that each bullet can be read alone.
+2. **A final editing pass (Groq).** When every part is written, checked and reviewed, and the parts are merged, one more call gives the whole note to the model with the transcript (when it is not longer than 14000 characters). The model may change wording, headings and order, never facts. The result goes through the same checks as a draft (a number or a name that is not in the recording is removed) and is only used when it is not clearly worse (more than a third of the bullets lost, figures lost, tasks lost, wrong language). If the pass fails for any reason the note is kept as it was. It costs one more call per note. Set `GROQ_POLISH=0` to skip it.
+3. **A deterministic scrubber** (`app/speech.py`) that works on every engine's output, including the rules and notes saved earlier. It rewrites "Explique moi comment...", "Tell me about...", "Peux-tu...", "Can you please..." into the content, drops leading "Ecoute,", "Listen,", "Look,", trailing "tu vois", "you know what I mean", whole sentences that are only framing ("Voila.", "As I said before.", "In this note I am going to talk about...") and, for French and Spanish, fillers such as "euh", "du coup", "en fait", "je pense que" and repeated starts ("c'est que, c'est que"). It is written for English, French and Spanish; other languages rely on the prompts.
+
 ### Review pass and final call (Groq)
 
 When notes are written by the Groq chat model, every part of the transcript is written, checked against the
@@ -107,9 +119,10 @@ Settings (environment variables):
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `GROQ_REVIEW` | `1` | `0`, `false`, `no` or `off` turns the review pass off (one call per part). |
+| `GROQ_POLISH` | `1` | `0`, `false`, `no` or `off` turns off the final editing pass on the wording of the whole note (one call per note). |
 | `GROQ_CHAT_MAX_TOKENS` | `4096` | Longest answer asked from the chat model, kept between 512 and 8192. |
 
-The review doubles the number of chat calls. On the free Groq tier a rate limit is retried twice (waiting as long as
+The review doubles the number of chat calls, and the final editing pass adds one more per note. On the free Groq tier a rate limit is retried twice (waiting as long as
 Groq asks, at most 20 seconds); a review that would have to wait longer is skipped. Set `GROQ_REVIEW=0` if you are
 often rate limited. The local Ollama model is not affected: it stays single pass.
 
@@ -174,6 +187,7 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `POST` | `/api/notes/{id}/restructure` | Write the notes of a finished note again from its transcript (202), or 409 when it is not finished or has no transcript. The earlier notes stay until the new ones are ready, and stay if the rebuild fails (`rebuild_error` says why). |
 | `POST` | `/api/notes/{id}/seen` | Mark a finished note as opened (204, 404 for an unknown note; safe to repeat). The list rows (`GET /api/notes`) carry `unseen: true` for finished notes that were never opened. |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. A PDF of a note written mostly in a script the PDF fonts cannot draw (Arabic, Hebrew, Chinese, Japanese, Korean, Thai, Indic) is refused with status 422 and a message; Markdown and text always work. |
+| `GET` | `/api/export/all?format=md\|txt&transcript=true` | A ZIP with one file per finished note (newest first, the file names start with the date). 404 when there is no finished note, 400 for another format. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
 The page itself is also served at `/n/<id>` (the share link) for any id; the script shows the note, or a friendly message when there is no such note. These responses carry `X-Robots-Tag: noindex, nofollow`.
@@ -192,7 +206,7 @@ playwright install chromium
 pytest tests/e2e
 ```
 
-They cover renaming, searching, key points, the checklist, rebuilding notes, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
+They cover the outline, the shortcuts and the backup link, renaming, searching, key points, the checklist, rebuilding notes, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
 
 ## Project layout
 
@@ -203,6 +217,7 @@ app/
   audio.py        ffmpeg conversion and chunking
   transcribe.py   Groq Whisper client
   languages.py    the languages of the start page
+  speech.py       removes spoken framing and French or Spanish fillers from sentences
   structure.py    Groq and Ollama structuring, the checks on model output and the rule-based fallback
   visuals.py      mind map, process and chart drawings built from the notes
   export.py       PDF, TXT and Markdown output

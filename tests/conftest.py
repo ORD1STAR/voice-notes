@@ -33,6 +33,9 @@ def env(tmp_path, monkeypatch):
     # Structuring through Groq is switched off by default and never reaches the real network in tests.
     # Tests of that path turn it on and replace the HTTP calls.
     monkeypatch.setenv("USE_GROQ_CHAT", "0")
+    # The final editing pass is one more chat call; the tests that count calls leave it off, the tests of the
+    # pass itself turn it on.
+    monkeypatch.setenv("GROQ_POLISH", "0")
     monkeypatch.setenv("GROQ_CHAT_URL", "http://127.0.0.1:9/openai/v1/chat/completions")
     monkeypatch.setenv("GROQ_MODELS_URL", "http://127.0.0.1:9/openai/v1/models")
     monkeypatch.delenv("GROQ_CHAT_MODEL", raising=False)

@@ -277,7 +277,8 @@ def test_plan_and_status_name_the_engine_without_calling_the_network(monkeypatch
     net = FakeNet(monkeypatch)
     plan = structure.engine_plan()
     assert plan["engine"] == "groq:llama-3.3-70b-versatile" and plan["backup"]["engine"] == "rule-based"
-    assert structure.groq_status() == {"enabled": True, "model": "llama-3.3-70b-versatile", "reason": "", "review": False}
+    assert structure.groq_status() == {"enabled": True, "model": "llama-3.3-70b-versatile", "reason": "", "review": False,
+                                      "polish": False}
     assert net.model_calls == 0 and net.chat_calls == []
     monkeypatch.setenv("USE_GROQ_CHAT", "0")
     assert structure.engine_plan()["engine"] == "rule-based"
