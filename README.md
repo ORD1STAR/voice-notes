@@ -14,7 +14,7 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 
 ## Features
 
-- Owner login: the app asks for the owner password before it shows or accepts anything (the public share link is the one exception). The password is kept only as a salted scrypt hash, the session is an HttpOnly cookie, and failed logins are rate limited. See "Owner login" below.
+- Accounts and login: the app asks for an email and password before it shows or accepts anything (the public share link is the one exception). Anyone can sign up (this can be turned off) and sees only their own notes. Passwords are kept only as salted scrypt hashes, the session is an HttpOnly cookie, failed logins are rate limited per address and per email, and a forgotten password is reset with a one-time code sent by email. See "Accounts and login" below.
 - Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker, or record straight from the browser (needs https or localhost for microphone access).
 - Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined. Chunks are cut in the quiet gaps between words, so no word is split in two; when there is no gap, the next chunk starts two seconds early and the repeated words are removed when the texts are joined.
 - Notes written by a strong chat model on Groq (`llama-3.3-70b-versatile` by default): speech is rewritten into proper sentences, fillers, stutters and false starts are removed, and nothing is invented. If Groq cannot be used, the small local model served by Ollama writes the notes, and if that is not available either, a rule-based fallback still produces a title, summary, key points, sections and action items. The status card on the start page, the progress page and the result say which engine was used and, when it was not the first choice, why. If a model fails on one part of a long note, only that part falls back to the rules. See "How the notes are built" below.
@@ -141,8 +141,13 @@ Everything is set through environment variables.
 | --- | --- | --- |
 | `GROQ_API_KEY` | none, required | Groq API key. Read from the environment only, never stored or logged, never returned by any endpoint. |
 | `VOICE_NOTES_PASSWORD_HASH` | none, required | Salted hash of the owner password, made with `python -m app.auth`. Without it nobody can sign in. See "Owner login". |
+| `VOICE_NOTES_OWNER_EMAIL` | none | The email address of the owner account. When set, the owner signs in with this email and the password of `VOICE_NOTES_PASSWORD_HASH`, and the existing notes stay theirs. When not set, the old setup stays: the owner signs in with the password alone (the email field stays empty). |
+| `VOICE_NOTES_SIGNUP` | `on` | `off` closes the sign up page. Existing accounts keep working. |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | none, port `587` | The mail server used to send password reset codes. Read from the environment only, never logged or returned. STARTTLS is used when the server offers it (port 465 uses TLS from the start). Without `SMTP_HOST` no mail is sent. |
+| `SMTP_FROM` | `SMTP_USER` | Optional sender address when `SMTP_USER` is not an address. |
+| `VOICE_NOTES_BASE_URL` | none | Optional public address of the site (for example `https://notes.example.org`). The reset mail then names the address of the reset page. The server never builds links from the request, so a forged Host header cannot change them. |
 | `VOICE_NOTES_SESSION_DAYS` | `14` | How long a login lasts. |
-| `VOICE_NOTES_LOGIN_MAX_FAILS` | `5` | Failed logins allowed per client address in the window. All addresses together may fail ten times as many. |
+| `VOICE_NOTES_LOGIN_MAX_FAILS` | `5` | Failed logins allowed per client address, and per email address, in the window. All addresses together may fail ten times as many. |
 | `VOICE_NOTES_LOGIN_WINDOW` | `900` | Length of that window in seconds. A locked client gets status 429 with `Retry-After`. |
 | `VOICE_NOTES_TRUST_PROXY` | off | Set to `1` only behind a reverse proxy you control. The proxy's `X-Forwarded-For` (last entry) is then used as the client address and `X-Forwarded-Proto: https` marks the cookie `Secure`. Never set it when the port is reachable directly. |
 | `VOICE_NOTES_AUTH` | on | `off` switches the login off. Only for local development and the test suite; never use it on a reachable server. |
@@ -175,9 +180,9 @@ GROQ_API_KEY=... python -m app
 
 As a service, see `deploy/voice-notes.service` for a systemd unit. The server listens on all interfaces on port 2525; if you use a firewall, allow the port (`sudo ufw allow 2525/tcp` with ufw).
 
-## Owner login
+## Accounts and login
 
-The app has one owner. Everything needs a login, except the login page (and the files it loads), the public share view (`/n/<id>` with the two reads it makes, `GET /api/notes/<id>` and its export, which the server answers only for a public note, a private note with its link secret, or the owner) and the logout. Without a configured password the server refuses every protected request and the login page says so, so a new install is never open by accident.
+There is one owner account (the one that held all notes before accounts existed) and any number of other accounts. Everything needs a login, except the login, sign up and password recovery pages (and the files they load), the public share view (`/n/<id>` with the two reads it makes, `GET /api/notes/<id>` and its export, which the server answers only for a public note, a private note with its link secret, or the owner) and the logout. Without a configured password the server refuses every protected request and the login page says so, so a new install is never open by accident.
 
 **First run: set the owner password.**
 
@@ -198,11 +203,17 @@ The app has one owner. Everything needs a login, except the login page (and the 
    In a shell, use single quotes or `$(...)` as in the quick start.
 3. Restart the server and sign in at `/login`. To change the password, make a new hash and restart; every session ends at the restart.
 
-**How it works.** The password is checked with scrypt (a standard memory hard hash from Python's `hashlib`) against the stored salted hash, in constant time. A correct password creates a random session token. The cookie `vn_session` is `HttpOnly` and `SameSite=Lax`, and `Secure` when the page is served over https (directly, or behind a trusted proxy, see `VOICE_NOTES_TRUST_PROXY`). Sessions are kept in the server's memory (only a hash of the token), last 14 days, end at logout (`POST /api/logout`, the "Sign out" link in the page footer) and end when the server restarts. After 5 failed logins from one address in 15 minutes, that address gets status 429 until the window has passed, even with the right password. The rate limit is also kept in memory. A request to the API without a session gets status 401, a request for a page is sent to `/login`.
+**Move the owner to an email account.** Set `VOICE_NOTES_OWNER_EMAIL` to the owner's address and restart. At start the server writes the owner's entry into `DATA_DIR/accounts.json` (mode 600) with the hash from `VOICE_NOTES_PASSWORD_HASH`, and from then on the owner signs in with that email and password; all existing notes stay the owner's. The environment hash only seeds the entry the first time: after that the password is changed with "Forgot password", and the hash in the environment must stay valid (it is also the switch that tells the server it is set up). To seed again from a new hash, delete the owner entry from `accounts.json` while the server is stopped. Do not change the owner email later: the notes belong to the account `owner`, which is whatever address `VOICE_NOTES_OWNER_EMAIL` names when the server starts, and a different address would sign in as an ordinary account without them. Without `VOICE_NOTES_OWNER_EMAIL` nothing changes for the owner: the password alone signs in, and the email field of the login page stays empty.
+
+**Sign up.** `/signup` takes an email and a password of at least 10 characters. The email is not confirmed by a message, the account signs in at once, and it can only see and change its own notes. A second sign up with the same address (any letter case) is refused. At most 10 sign ups per address in 15 minutes. Set `VOICE_NOTES_SIGNUP=off` to close it. Note that every account uploads with the one `GROQ_API_KEY` of the server, so with sign up on, anyone who finds the address can use your Groq quota; turn it off once the people you want have accounts.
+
+**Forgot password.** `/forgot` asks for the email. The reply is always the same text, whether the account exists or not, and the mail is sent after the reply, so the reply time does not tell either. If the account exists, a random token (256 bits) is mailed through the SMTP settings. Only the sha256 of the token is stored, with the account and the expiry. It works once, for 30 minutes, and a newer request cancels an older token. The mail contains the code, not a link with the code in it, so the code never appears in a URL or an access log; the person opens `/reset` and enters the code with the new password (at least 10 characters). A successful reset ends the open sessions of that account. At most 3 mails per email and 10 requests per address in 15 minutes are sent; the reply stays the same when the limit is reached.
+
+**How it works.** The password is checked with scrypt (a standard memory hard hash from Python's `hashlib`) against the stored salted hash, in constant time. A correct password creates a random session token. The cookie `vn_session` is `HttpOnly` and `SameSite=Lax`, and `Secure` when the page is served over https (directly, or behind a trusted proxy, see `VOICE_NOTES_TRUST_PROXY`). Sessions are kept in the server's memory (only a hash of the token), last 14 days, end at logout (`POST /api/logout`, the "Sign out" link in the page footer) and end when the server restarts. After 5 failed logins from one address in 15 minutes, that address gets status 429 until the window has passed, even with the right password; the same holds for one email address from any address (this also means someone can lock out a known email for 15 minutes by failing on purpose). A wrong password and an unknown email give the same answer. The rate limit is also kept in memory. A request to the API without a session gets status 401, a request for a page is sent to `/login`.
 
 **Serve it over https.** A password sent over plain http can be read on the network. Put the app behind a reverse proxy that does https (and then set `VOICE_NOTES_TRUST_PROXY=1`), or keep it on a private network or VPN. The share link is still a secret address that anyone who has it can read.
 
-Every note stores an `owner` (the single owner account, `owner`) and a `share` mode (`private` or `public`). Notes saved before these fields existed count as the owner's and private when they are read; their files are not rewritten until the note is saved for another reason. The list, search, task list, backup, edit, pin, rename, delete, rebuild and share endpoints only see the notes of the signed in owner. The field leaves room for more accounts later: a session would then map to its own owner. Not covered by this step: there is only one account, and the server access log can contain the `t` secret of a private link.
+Every note stores an `owner` (`owner` for the owner account, the email address for any other account) and a `share` mode (`private` or `public`). Notes saved before these fields existed count as the owner's and private when they are read; their files are not rewritten until the note is saved for another reason. The list, search, task list, backup, edit, pin, rename, delete, rebuild and share endpoints only see the notes of the signed in owner. Not covered: accounts are not confirmed by email, there is no way to delete or rename an account from the page, and the server access log can contain the `t` secret of a private link.
 
 ## How it works
 
@@ -216,7 +227,10 @@ Every note stores an `owner` (the single owner account, `owner`) and a `share` m
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `POST` | `/login` | Form field `password`. 303 to `/` and a session cookie on success, 401 for a wrong password, 429 with `Retry-After` while locked, 503 when no password hash is configured. |
+| `POST` | `/login` | Form fields `email` and `password` (`email` is left empty in the hash-only setup). 303 to `/` and a session cookie on success, 401 for a wrong email or password, 429 with `Retry-After` while locked, 503 when no password hash is configured. |
+| `POST` | `/signup` | Form fields `email` and `password` (10 characters or more). 303 to `/` with a session cookie, 400 for an invalid email or a short password, 409 for an email already used, 403 when sign up is off, 429 when too many. |
+| `POST` | `/forgot` | Form field `email`. Always the same 200 page. Mails a one-time token when the account exists. |
+| `POST` | `/reset` | Form fields `token` and `password`. 200 when the password was changed, 400 for a wrong, used or expired token or a short password. |
 | `POST` | `/api/logout` | Ends the session and clears the cookie (204). |
 | `GET` | `/api/health` | Server status: ffmpeg, key present, `groq_chat` (whether Groq writes the notes, and with which model), Ollama state, `languages` (the codes and names the start page offers) and `structuring` (the engine the next note will use, `groq:<model>`, `ollama:<model>` or `rule-based`, with `backup` and, if it is the fallback, why). |
 | `POST` | `/api/notes` | Multipart upload with a `file` field and an optional `language` field: `auto` (the default; Whisper detects the language), or one of `en`, `fr`, `ar`, `es`, `de`, `it`, `pt`, `tr`, `zh` (case does not matter; an empty value means `auto`). Any other value is refused with status 400 and nothing is stored. A chosen code is sent to Groq Whisper as the `language` parameter and given to the notes prompt; with `auto` the parameter is left out. Returns `{"id": ...}` with status 202. |
@@ -244,7 +258,7 @@ pip install -r requirements-dev.txt
 pytest tests --ignore=tests/e2e     # backend: chunking, transcription client, structuring, exports, API
 ```
 
-The test suite runs with the login switched off (`VOICE_NOTES_AUTH=off`, set in `tests/conftest.py`), except `tests/test_auth.py`, which tests the login itself.
+The test suite runs with the login switched off (`VOICE_NOTES_AUTH=off`, set in `tests/conftest.py`), except `tests/test_auth.py` (the login) and `tests/test_accounts.py` (accounts, sign up, recovery), which turn it on. Every test gets a fake SMTP (`tests/fake_smtp.py`) in place of `smtplib`, so no test sends a real mail or opens a network connection.
 
 Browser tests drive the real server with Chromium. Groq (transcription, model list and chat) and Ollama are replaced by small fake services, so they need no key and no network. The backend tests replace the HTTP calls and never reach the real Groq API either:
 
@@ -260,7 +274,9 @@ They cover the outline, the shortcuts and the backup link, renaming, pinning, th
 ```
 app/
   main.py         FastAPI routes
-  auth.py         owner login: password hash, sessions, rate limit, `python -m app.auth`
+  auth.py         password hash, sessions, rate limit, the login, sign up and recovery pages, `python -m app.auth`
+  accounts.py     accounts by email in DATA_DIR/accounts.json, owner migration, recovery tokens
+  mailer.py       sends the reset mail through SMTP
   jobs.py         job state, storage and the processing pipeline
   audio.py        ffmpeg conversion and chunking
   transcribe.py   Groq Whisper client

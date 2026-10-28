@@ -9,12 +9,12 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import quote
 
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audio, auth, export, jobs, languages, structure, visuals
+from . import accounts, audio, auth, export, jobs, languages, mailer, structure, visuals
 from .config import settings
 
 # The app's own log lines (which engine wrote each note) go to the console next to the server's lines.
@@ -36,6 +36,11 @@ async def lifespan(app: FastAPI):
         _log.warning("VOICE_NOTES_AUTH=off: the login is switched off. Use this for local development only.")
     elif not auth.configured():
         _log.warning("VOICE_NOTES_PASSWORD_HASH is not set or not valid: nobody can sign in. See README.md.")
+    else:
+        accounts.migrate_owner()
+        if not accounts.owner_email():
+            _log.warning("VOICE_NOTES_OWNER_EMAIL is not set: the owner signs in with the password alone (leave the email "
+                         "empty). Set it to move the owner to an email account. See README.md.")
     jobs.load_all()
     yield
 
@@ -43,9 +48,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Voice Notes", docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
-# ---------------------------------------------------------------- owner login
-# Everything needs the owner's session except the login page, the files the login page loads, the public share view
-# (the page /n/<id> and the two reads it makes) and the logout. Without a configured password hash the server
+# ---------------------------------------------------------------- accounts and login
+# Everything needs a session except the login, sign up and password recovery pages, the files they load, the public
+# share view (the page /n/<id> and the two reads it makes) and the logout. Without a configured password hash the server
 # refuses every protected request, so a new install is never open by accident.
 _PUBLIC_ASSETS = {"/app.js", "/style.css", "/favicon.svg"}
 _SHARE_PAGE = re.compile(r"/n/[^/]*/?")
@@ -53,7 +58,7 @@ _SHARE_READS = re.compile(r"/api/notes/[^/]+(/export)?")
 
 
 def _is_public(method: str, path: str) -> bool:
-    if path == "/login" and method in ("GET", "HEAD", "POST"):
+    if path in ("/login", "/signup", "/forgot", "/reset") and method in ("GET", "HEAD", "POST"):
         return True
     if path == "/api/logout" and method == "POST":
         return True
@@ -64,12 +69,12 @@ def _is_public(method: str, path: str) -> bool:
 
 
 def _caller(request: Request) -> str | None:
-    """The account that sent the request, or None for a visitor without a session. There is one account for now;
-    with more accounts this is the one place that maps a session to its owner."""
+    """The account id that sent the request, or None for a visitor without a session. The owner account is
+    jobs.OWNER; every other account is its email address. This is the one place that maps a session to its owner."""
     if auth.auth_disabled():
         return jobs.OWNER
-    if auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME)):
-        return jobs.OWNER
+    if auth.configured():
+        return auth.session_account(request.cookies.get(auth.COOKIE_NAME))
     return None
 
 
@@ -140,15 +145,129 @@ def _login_response(html: str, status: int = 200, **headers) -> HTMLResponse:
     return HTMLResponse(html, status_code=status, headers={"Cache-Control": "no-store", **headers})
 
 
+def _signed_in(request: Request) -> bool:
+    return auth.auth_disabled() or (auth.configured() and auth.session_account(request.cookies.get(auth.COOKIE_NAME)) is not None)
+
+
+def _login_html(message: str = "", info: str = "") -> str:
+    return auth.login_page(message, email_required=bool(accounts.owner_email()), signup=auth.signup_open(), info=info)
+
+
+def _start_session(request: Request, account: str) -> RedirectResponse:
+    token = auth.new_session(account)
+    response = RedirectResponse("/", status_code=303)
+    response.set_cookie(auth.COOKIE_NAME, token, max_age=auth.session_seconds(), httponly=True,
+                        samesite="lax", secure=_is_https(request), path="/")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @app.get("/login")
 def login_page(request: Request):
-    if auth.auth_disabled() or (auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME))):
+    if _signed_in(request):
         return RedirectResponse("/", status_code=303)
-    return _login_response(auth.login_page(setup_missing=not auth.configured()), 200 if auth.configured() else 503)
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    return _login_response(_login_html())
 
 
 @app.post("/login")
-def login(request: Request, password: str = Form("")):
+def login(request: Request, email: str = Form(""), password: str = Form("")):
+    if auth.auth_disabled():
+        return RedirectResponse("/", status_code=303)
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    client = _client_id(request)
+    typed = email.strip().lower()[:254]
+    wait = auth.retry_after(client, typed)
+    if wait:
+        return _login_response(_login_html("Too many failed attempts. Try again later."), 429,
+                               **{"Retry-After": str(wait)})
+    account = None
+    if len(password) <= auth.MAX_PASSWORD:
+        if not typed and not accounts.owner_email():
+            # the hash-only setup: no email is asked, the password alone opens the owner account
+            if auth.verify_password(password, auth.password_hash()):
+                account = jobs.OWNER
+        else:
+            normal = accounts.normalize_email(typed)
+            account = accounts.check(normal, password) if normal else None
+    if account is not None:
+        auth.clear_failures(client, typed)
+        return _start_session(request, account)
+    auth.record_failure(client, typed)
+    return _login_response(_login_html("Wrong email or password."), 401)
+
+
+@app.get("/signup")
+def signup_page(request: Request):
+    if _signed_in(request):
+        return RedirectResponse("/", status_code=303)
+    if not auth.configured():
+        return _login_response(auth.signup_page(setup_missing=True), 503)
+    if not auth.signup_open():
+        return _login_response(auth.signup_page(closed=True), 403)
+    return _login_response(auth.signup_page())
+
+
+@app.post("/signup")
+def signup(request: Request, email: str = Form(""), password: str = Form("")):
+    if auth.auth_disabled():
+        return RedirectResponse("/", status_code=303)
+    if not auth.configured():
+        return _login_response(auth.signup_page(setup_missing=True), 503)
+    if not auth.signup_open():
+        return _login_response(auth.signup_page(closed=True), 403)
+    client = _client_id(request)
+    normal = accounts.normalize_email(email)
+    if not auth.allow_event("signup", client, normal or "", per_address=10, per_email=5):
+        return _login_response(auth.signup_page("Too many attempts. Try again later."), 429)
+    if not normal:
+        return _login_response(auth.signup_page("Enter a valid email address."), 400)
+    if len(password) < auth.MIN_PASSWORD or len(password) > auth.MAX_PASSWORD:
+        return _login_response(auth.signup_page(f"The password needs at least {auth.MIN_PASSWORD} characters."), 400)
+    if not accounts.create(normal, password):
+        return _login_response(auth.signup_page("An account with this email already exists. Sign in instead."), 409)
+    return _start_session(request, accounts.account_id(normal))
+
+
+def _send_reset(email: str) -> None:
+    """Runs after the reply is sent, so the time taken does not tell whether the account exists."""
+    token = accounts.issue_token(email)
+    if token:
+        mailer.send_reset(email, token)
+
+
+@app.get("/forgot")
+def forgot_page(request: Request):
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    return _login_response(auth.forgot_page())
+
+
+@app.post("/forgot")
+def forgot(request: Request, background: BackgroundTasks, email: str = Form("")):
+    if auth.auth_disabled():
+        return RedirectResponse("/", status_code=303)
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    client = _client_id(request)
+    normal = accounts.normalize_email(email)
+    # The reply is the same for a known email, an unknown one, an invalid one and a request over the limit.
+    if auth.allow_event("forgot", client, normal or "", per_address=10, per_email=3) and normal:
+        background.add_task(_send_reset, normal)
+    return _login_response(auth.forgot_page(sent=True))
+
+
+@app.get("/reset")
+def reset_page(request: Request):
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    return _login_response(auth.reset_page())
+
+
+@app.post("/reset")
+def reset(request: Request, token: str = Form(""), password: str = Form("")):
     if auth.auth_disabled():
         return RedirectResponse("/", status_code=303)
     if not auth.configured():
@@ -156,18 +275,17 @@ def login(request: Request, password: str = Form("")):
     client = _client_id(request)
     wait = auth.retry_after(client)
     if wait:
-        return _login_response(auth.login_page("Too many failed attempts. Try again later."), 429,
+        return _login_response(auth.reset_page("Too many failed attempts. Try again later."), 429,
                                **{"Retry-After": str(wait)})
-    if len(password) <= 1024 and auth.verify_password(password, auth.password_hash()):
-        auth.clear_failures(client)
-        token = auth.new_session()
-        response = RedirectResponse("/", status_code=303)
-        response.set_cookie(auth.COOKIE_NAME, token, max_age=auth.session_seconds(), httponly=True,
-                            samesite="lax", secure=_is_https(request), path="/")
-        response.headers["Cache-Control"] = "no-store"
-        return response
-    auth.record_failure(client)
-    return _login_response(auth.login_page("Wrong password."), 401)
+    if len(password) < auth.MIN_PASSWORD or len(password) > auth.MAX_PASSWORD:
+        # checked before the token is touched, so a typing slip does not burn the code
+        return _login_response(auth.reset_page(f"The password needs at least {auth.MIN_PASSWORD} characters."), 400)
+    account = accounts.use_token(token[:200], password) if token.strip() else None
+    if account is None:
+        auth.record_failure(client)
+        return _login_response(auth.reset_page("This code is not valid or has expired. Ask for a new one."), 400)
+    auth.end_sessions_of(account)
+    return _login_response(auth.reset_page(done=True))
 
 
 @app.post("/api/logout", status_code=204)

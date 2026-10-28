@@ -26,6 +26,8 @@ def _find_ffmpeg() -> str | None:
         return None
 
 
+OUTBOX: list = []  # the outbox of the running test (see the env fixture)
+
 FFMPEG = _find_ffmpeg()
 needs_ffmpeg = pytest.mark.skipif(FFMPEG is None, reason="ffmpeg is not available")
 
@@ -50,6 +52,24 @@ def env(tmp_path, monkeypatch):
     monkeypatch.delenv("GROQ_CHAT_MODEL", raising=False)
     monkeypatch.delenv("TRANSCRIPTION_LANGUAGE", raising=False)
     monkeypatch.delenv("MAX_UPLOAD_MB", raising=False)
+    # Accounts: the hash-only owner setup, sign up on, and no real mail server. Every test gets a fake SMTP, so no
+    # test can reach the network even if a mail setting is present in the environment.
+    monkeypatch.delenv("VOICE_NOTES_OWNER_EMAIL", raising=False)
+    monkeypatch.delenv("VOICE_NOTES_SIGNUP", raising=False)
+    monkeypatch.delenv("VOICE_NOTES_BASE_URL", raising=False)
+    for name in ("SMTP_HOST", "SMTP_PORT", "SMTP_USER", "SMTP_PASSWORD", "SMTP_FROM"):
+        monkeypatch.delenv(name, raising=False)
+    import smtplib
+
+    from fake_smtp import Outbox, make_fake
+
+    box = Outbox()
+    monkeypatch.setattr(smtplib, "SMTP", make_fake(box))
+    monkeypatch.setattr(smtplib, "SMTP_SSL", make_fake(box, ssl_class=True))
+    from app import auth as _auth
+
+    _auth.reset_state()
+    OUTBOX.append(box)
     monkeypatch.delenv("CHUNK_SECONDS", raising=False)
     if FFMPEG:
         monkeypatch.setenv("FFMPEG_BIN", FFMPEG)
@@ -57,6 +77,12 @@ def env(tmp_path, monkeypatch):
 
     structure.reset_groq_cache()
     return tmp_path
+
+
+@pytest.fixture
+def outbox(env):
+    """The mails the fake SMTP received during this test."""
+    return OUTBOX[-1]
 
 
 @pytest.fixture

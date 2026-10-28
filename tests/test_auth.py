@@ -189,7 +189,7 @@ def test_the_cookie_is_secure_behind_a_trusted_proxy_that_says_https(secured, mo
 
 def test_a_wrong_password_gives_no_session(client):
     r = sign_in(client, "not the password")
-    assert r.status_code == 401 and "Wrong password" in r.text
+    assert r.status_code == 401 and "Wrong email or password" in r.text
     assert "set-cookie" not in r.headers and auth.COOKIE_NAME not in client.cookies
     assert client.get("/api/notes").status_code == 401
     assert sign_in(client, "").status_code == 401

@@ -65,7 +65,7 @@ def test_sign_in_use_the_app_and_sign_out(chromium, secured_stack):
 
     page.fill("#password", "wrong password")
     page.click("button[type=submit]")
-    page.locator(".field-error", has_text="Wrong password").wait_for()
+    page.locator(".field-error", has_text="Wrong email or password").wait_for()
     assert page.url.endswith("/login")
 
     page.fill("#password", PASSWORD)
