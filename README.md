@@ -14,6 +14,7 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 
 ## Features
 
+- Owner login: the app asks for the owner password before it shows or accepts anything (the public share link is the one exception). The password is kept only as a salted scrypt hash, the session is an HttpOnly cookie, and failed logins are rate limited. See "Owner login" below.
 - Upload audio or video files up to 200 MB (MP3, M4A, WAV, OGG, FLAC, WebM, MP4 and more), by drag and drop or file picker, or record straight from the browser (needs https or localhost for microphone access).
 - Long recordings are converted and split with ffmpeg into chunks well under Groq's 25 MB free tier limit, transcribed one by one and joined. Chunks are cut in the quiet gaps between words, so no word is split in two; when there is no gap, the next chunk starts two seconds early and the repeated words are removed when the texts are joined.
 - Notes written by a strong chat model on Groq (`llama-3.3-70b-versatile` by default): speech is rewritten into proper sentences, fillers, stutters and false starts are removed, and nothing is invented. If Groq cannot be used, the small local model served by Ollama writes the notes, and if that is not available either, a rule-based fallback still produces a title, summary, key points, sections and action items. The status card on the start page, the progress page and the result say which engine was used and, when it was not the first choice, why. If a model fails on one part of a long note, only that part falls back to the rules. See "How the notes are built" below.
@@ -65,10 +66,11 @@ git clone <your repository url> voice-notes
 cd voice-notes
 ./scripts/setup.sh          # creates .venv and installs requirements.txt
 export GROQ_API_KEY="your key from console.groq.com"
+export VOICE_NOTES_PASSWORD_HASH="$(./scripts/hash-password.sh)"   # asks for the owner password
 ./scripts/run.sh
 ```
 
-Open <http://localhost:2525>.
+Open <http://localhost:2525> and sign in with the owner password. See "Owner login" for how to keep the hash in a file.
 
 On Ubuntu, `sudo apt install ffmpeg` installs ffmpeg. A free Groq API key is available at <https://console.groq.com/keys>.
 
@@ -137,7 +139,13 @@ Everything is set through environment variables.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GROQ_API_KEY` | none, required | Groq API key. Read from the environment only, never stored or logged. |
+| `GROQ_API_KEY` | none, required | Groq API key. Read from the environment only, never stored or logged, never returned by any endpoint. |
+| `VOICE_NOTES_PASSWORD_HASH` | none, required | Salted hash of the owner password, made with `python -m app.auth`. Without it nobody can sign in. See "Owner login". |
+| `VOICE_NOTES_SESSION_DAYS` | `14` | How long a login lasts. |
+| `VOICE_NOTES_LOGIN_MAX_FAILS` | `5` | Failed logins allowed per client address in the window. All addresses together may fail ten times as many. |
+| `VOICE_NOTES_LOGIN_WINDOW` | `900` | Length of that window in seconds. A locked client gets status 429 with `Retry-After`. |
+| `VOICE_NOTES_TRUST_PROXY` | off | Set to `1` only behind a reverse proxy you control. The proxy's `X-Forwarded-For` (last entry) is then used as the client address and `X-Forwarded-Proto: https` marks the cookie `Secure`. Never set it when the port is reachable directly. |
+| `VOICE_NOTES_AUTH` | on | `off` switches the login off. Only for local development and the test suite; never use it on a reachable server. |
 | `PORT` | `2525` | Port the server listens on. |
 | `HOST` | `0.0.0.0` | Interface to bind. Use `127.0.0.1` to keep it local. |
 | `MAX_UPLOAD_MB` | `200` | Largest accepted upload. |
@@ -167,7 +175,34 @@ GROQ_API_KEY=... python -m app
 
 As a service, see `deploy/voice-notes.service` for a systemd unit. The server listens on all interfaces on port 2525; if you use a firewall, allow the port (`sudo ufw allow 2525/tcp` with ufw).
 
-The app has no login. Anyone who can reach the port can upload files and spend your Groq quota, so keep it on a private network, behind a VPN, or behind a reverse proxy that asks for a password.
+## Owner login
+
+The app has one owner. Everything needs a login, except the login page (and the files it loads), the public share view (`/n/<id>` with the two reads it makes, `GET /api/notes/<id>` and its export) and the logout. Without a configured password the server refuses every protected request and the login page says so, so a new install is never open by accident.
+
+**First run: set the owner password.**
+
+1. Make the hash. The command asks for the password twice and shows nothing (at least 10 characters):
+
+   ```bash
+   ./scripts/hash-password.sh        # or: .venv/bin/python -m app.auth
+   ```
+
+   It prints one line that looks like `scrypt:32768:8:1:<salt>:<hash>`. The password itself is never stored or printed; the hash holds a random salt and a scrypt result.
+2. Give the line to the server as `VOICE_NOTES_PASSWORD_HASH`. For the systemd service, add it to `/etc/voice-notes.env` (mode 600, one `NAME=value` per line, no quotes needed):
+
+   ```
+   GROQ_API_KEY=...
+   VOICE_NOTES_PASSWORD_HASH=scrypt:32768:8:1:...:...
+   ```
+
+   In a shell, use single quotes or `$(...)` as in the quick start.
+3. Restart the server and sign in at `/login`. To change the password, make a new hash and restart; every session ends at the restart.
+
+**How it works.** The password is checked with scrypt (a standard memory hard hash from Python's `hashlib`) against the stored salted hash, in constant time. A correct password creates a random session token. The cookie `vn_session` is `HttpOnly` and `SameSite=Lax`, and `Secure` when the page is served over https (directly, or behind a trusted proxy, see `VOICE_NOTES_TRUST_PROXY`). Sessions are kept in the server's memory (only a hash of the token), last 14 days, end at logout (`POST /api/logout`, the "Sign out" link in the page footer) and end when the server restarts. After 5 failed logins from one address in 15 minutes, that address gets status 429 until the window has passed, even with the right password. The rate limit is also kept in memory. A request to the API without a session gets status 401, a request for a page is sent to `/login`.
+
+**Serve it over https.** A password sent over plain http can be read on the network. Put the app behind a reverse proxy that does https (and then set `VOICE_NOTES_TRUST_PROXY=1`), or keep it on a private network or VPN. The share link is still a secret address that anyone who has it can read.
+
+Not covered by this step: notes are not tied to separate users, and the share link has no private mode yet.
 
 ## How it works
 
@@ -181,6 +216,8 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 
 | Method | Path | Description |
 | --- | --- | --- |
+| `POST` | `/login` | Form field `password`. 303 to `/` and a session cookie on success, 401 for a wrong password, 429 with `Retry-After` while locked, 503 when no password hash is configured. |
+| `POST` | `/api/logout` | Ends the session and clears the cookie (204). |
 | `GET` | `/api/health` | Server status: ffmpeg, key present, `groq_chat` (whether Groq writes the notes, and with which model), Ollama state, `languages` (the codes and names the start page offers) and `structuring` (the engine the next note will use, `groq:<model>`, `ollama:<model>` or `rule-based`, with `backup` and, if it is the fallback, why). |
 | `POST` | `/api/notes` | Multipart upload with a `file` field and an optional `language` field: `auto` (the default; Whisper detects the language), or one of `en`, `fr`, `ar`, `es`, `de`, `it`, `pt`, `tr`, `zh` (case does not matter; an empty value means `auto`). Any other value is refused with status 400 and nothing is stored. A chosen code is sent to Groq Whisper as the `language` parameter and given to the notes prompt; with `auto` the parameter is left out. Returns `{"id": ...}` with status 202. |
 | `GET` | `/api/notes?q=garden` | Recent notes. With `q`, only the notes that contain every word of it, best title matches first, each with a `snippet`. |
@@ -196,6 +233,8 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `PUT` | `/api/notes/{id}/pin` | Pin a finished note to the top of the list or unpin it: `{"pinned": true}`. Returns the note (404 for an unknown or unfinished note, 422 for a body without a true or false `pinned`). The list rows and the note carry `pinned`. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
+Every route below needs the login session (status 401 without it) except `GET /api/notes/{id}` and its `/export`, which the public share view uses.
+
 The page itself is also served at `/n/<id>` (the share link) for any id; the script shows the note, or a friendly message when there is no such note. These responses carry `X-Robots-Tag: noindex, nofollow`.
 
 ## Tests
@@ -204,6 +243,8 @@ The page itself is also served at `/n/<id>` (the share link) for any id; the scr
 pip install -r requirements-dev.txt
 pytest tests --ignore=tests/e2e     # backend: chunking, transcription client, structuring, exports, API
 ```
+
+The test suite runs with the login switched off (`VOICE_NOTES_AUTH=off`, set in `tests/conftest.py`), except `tests/test_auth.py`, which tests the login itself.
 
 Browser tests drive the real server with Chromium. Groq (transcription, model list and chat) and Ollama are replaced by small fake services, so they need no key and no network. The backend tests replace the HTTP calls and never reach the real Groq API either:
 
@@ -219,6 +260,7 @@ They cover the outline, the shortcuts and the backup link, renaming, pinning, th
 ```
 app/
   main.py         FastAPI routes
+  auth.py         owner login: password hash, sessions, rate limit, `python -m app.auth`
   jobs.py         job state, storage and the processing pipeline
   audio.py        ffmpeg conversion and chunking
   transcribe.py   Groq Whisper client

@@ -5,7 +5,8 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=/opt/voice-notes
-# Put GROQ_API_KEY=... in this file (mode 600), one variable per line.
+# Put GROQ_API_KEY=... and VOICE_NOTES_PASSWORD_HASH=... in this file (mode 600), one variable per line.
+# Create the hash with: .venv/bin/python -m app.auth   (see README.md, section "Owner login").
 # Optional: GROQ_CHAT_MODEL (the Groq model that writes the notes) and OLLAMA_MODEL (the local backup model).
 EnvironmentFile=/etc/voice-notes.env
 ExecStart=/opt/voice-notes/.venv/bin/python -m app

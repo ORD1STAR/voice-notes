@@ -9,11 +9,11 @@ from pathlib import Path
 from urllib.parse import quote
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import audio, export, jobs, languages, structure, visuals
+from . import audio, auth, export, jobs, languages, structure, visuals
 from .config import settings
 
 # The app's own log lines (which engine wrote each note) go to the console next to the server's lines.
@@ -31,11 +31,102 @@ READ_SIZE = 1024 * 1024
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings.data_dir.mkdir(parents=True, exist_ok=True)
+    if auth.auth_disabled():
+        _log.warning("VOICE_NOTES_AUTH=off: the login is switched off. Use this for local development only.")
+    elif not auth.configured():
+        _log.warning("VOICE_NOTES_PASSWORD_HASH is not set or not valid: nobody can sign in. See README.md.")
     jobs.load_all()
     yield
 
 
 app = FastAPI(title="Voice Notes", docs_url=None, redoc_url=None, lifespan=lifespan)
+
+
+# ---------------------------------------------------------------- owner login
+# Everything needs the owner's session except the login page, the files the login page loads, the public share view
+# (the page /n/<id> and the two reads it makes) and the logout. Without a configured password hash the server
+# refuses every protected request, so a new install is never open by accident.
+_PUBLIC_ASSETS = {"/app.js", "/style.css", "/favicon.svg"}
+_SHARE_PAGE = re.compile(r"/n/[^/]*/?")
+_SHARE_READS = re.compile(r"/api/notes/[^/]+(/export)?")
+
+
+def _is_public(method: str, path: str) -> bool:
+    if path == "/login" and method in ("GET", "HEAD", "POST"):
+        return True
+    if path == "/api/logout" and method == "POST":
+        return True
+    if method not in ("GET", "HEAD"):
+        return False
+    return (path in _PUBLIC_ASSETS or path.startswith("/fonts/") or bool(_SHARE_PAGE.fullmatch(path))
+            or bool(_SHARE_READS.fullmatch(path)))
+
+
+@app.middleware("http")
+async def require_login(request: Request, call_next):
+    if auth.auth_disabled() or _is_public(request.method, request.url.path):
+        return await call_next(request)
+    if auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME)):
+        return await call_next(request)
+    if request.url.path.startswith("/api/"):
+        return JSONResponse({"error": "Sign in required."}, status_code=401, headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/login", status_code=303)
+
+
+def _is_https(request: Request) -> bool:
+    if request.url.scheme == "https":
+        return True
+    return auth.trust_proxy() and request.headers.get("x-forwarded-proto", "").split(",")[0].strip().lower() == "https"
+
+
+def _client_id(request: Request) -> str:
+    if auth.trust_proxy():
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[-1].strip()  # the address the trusted proxy saw
+    return request.client.host if request.client else "unknown"
+
+
+def _login_response(html: str, status: int = 200, **headers) -> HTMLResponse:
+    return HTMLResponse(html, status_code=status, headers={"Cache-Control": "no-store", **headers})
+
+
+@app.get("/login")
+def login_page(request: Request):
+    if auth.auth_disabled() or (auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME))):
+        return RedirectResponse("/", status_code=303)
+    return _login_response(auth.login_page(setup_missing=not auth.configured()), 200 if auth.configured() else 503)
+
+
+@app.post("/login")
+def login(request: Request, password: str = Form("")):
+    if auth.auth_disabled():
+        return RedirectResponse("/", status_code=303)
+    if not auth.configured():
+        return _login_response(auth.login_page(setup_missing=True), 503)
+    client = _client_id(request)
+    wait = auth.retry_after(client)
+    if wait:
+        return _login_response(auth.login_page("Too many failed attempts. Try again later."), 429,
+                               **{"Retry-After": str(wait)})
+    if len(password) <= 1024 and auth.verify_password(password, auth.password_hash()):
+        auth.clear_failures(client)
+        token = auth.new_session()
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(auth.COOKIE_NAME, token, max_age=auth.session_seconds(), httponly=True,
+                            samesite="lax", secure=_is_https(request), path="/")
+        response.headers["Cache-Control"] = "no-store"
+        return response
+    auth.record_failure(client)
+    return _login_response(auth.login_page("Wrong password."), 401)
+
+
+@app.post("/api/logout", status_code=204)
+def logout(request: Request):
+    auth.end_session(request.cookies.get(auth.COOKIE_NAME))
+    response = Response(status_code=204)
+    response.delete_cookie(auth.COOKIE_NAME, path="/", httponly=True, samesite="lax", secure=_is_https(request))
+    return response
 
 
 SECURITY_HEADERS = {

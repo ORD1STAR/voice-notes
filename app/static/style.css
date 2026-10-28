@@ -877,3 +877,17 @@ kbd {
 @media print {
   .outline, .to-top, .backup, .foot-keys { display: none !important; }
 }
+
+/* Login page */
+.login-page { display: grid; place-items: center; min-height: 100vh; padding: 1.5rem; }
+.login-box { width: 100%; max-width: 24rem; }
+.login-box h1 { margin: 0 0 1.25rem; }
+.login-form { display: grid; gap: 0.6rem; }
+.login-form label { font-weight: 600; }
+.login-form input {
+  min-height: 2.75rem; padding: 0.5rem 0.75rem; font: inherit; color: var(--ink);
+  background: var(--surface); border: 1px solid var(--line-strong); border-radius: 10px;
+}
+.login-form input:hover { border-color: var(--ink); }
+.login-form .btn { margin-top: 0.4rem; }
+body.focus #logout { display: none; }

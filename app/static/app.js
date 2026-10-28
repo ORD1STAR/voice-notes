@@ -113,6 +113,7 @@
   function api(path, opts) {
     return fetch(path, opts).then(function (res) {
       if (res.ok) return res;
+      if (res.status === 401 && !focusMatch) { location.replace("/login"); }
       return res.json().catch(function () { return {}; }).then(function (body) {
         var err = new Error(body.error || (body.detail && typeof body.detail === "string" ? body.detail : "The request failed (" + res.status + ")."));
         err.status = res.status;
@@ -382,6 +383,7 @@
     };
     xhr.onload = function () {
       uploading = false;
+      if (xhr.status === 401) { location.replace("/login"); return; }
       var body = {};
       try { body = JSON.parse(xhr.responseText); } catch (x) { /* not JSON */ }
       if (xhr.status === 202 && body.id) {
@@ -1481,6 +1483,10 @@
   var keysDialog = $("keys");
   function openKeys() { if (!keysDialog.open) keysDialog.showModal(); }
   $("keys-open").addEventListener("click", openKeys);
+  $("logout").addEventListener("click", function () {
+    var done = function () { location.replace("/login"); };
+    fetch("/api/logout", { method: "POST" }).then(done, done);
+  });
 
   function typingIn(t) {
     return !!t && (t.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName));

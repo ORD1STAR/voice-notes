@@ -1,3 +1,4 @@
+import os
 import shutil
 import subprocess
 import sys
@@ -6,6 +7,11 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# The existing tests, including the browser tests that start their own server, run with the owner login
+# switched off. tests/test_auth.py turns it on for its own tests. Set here (and not in a fixture) so that the
+# servers started by module scoped fixtures inherit it.
+os.environ.setdefault("VOICE_NOTES_AUTH", "off")
 
 
 def _find_ffmpeg() -> str | None:
