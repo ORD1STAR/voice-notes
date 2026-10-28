@@ -114,6 +114,8 @@ def test_a_made_up_or_empty_cookie_is_not_a_session(client):
 
 def test_the_public_pages_work_without_a_session(client):
     nid = make_done()
+    assert client.get(f"/api/notes/{nid}").status_code == 403  # a new note is private
+    jobs.set_share(nid, "public")  # the share reads below are for a public note
     assert client.get("/login").status_code == 200
     for asset in ("/app.js", "/style.css", "/favicon.svg", "/fonts/InstrumentSans-latin.woff2"):
         assert client.get(asset).status_code == 200, asset

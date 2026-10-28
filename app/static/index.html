@@ -193,8 +193,9 @@
         <section id="view-missing" aria-labelledby="missing-title" hidden>
           <p class="eyebrow">Not found</p>
           <h1 id="missing-title" tabindex="-1">This note does not exist</h1>
-          <p class="lede">The link may be mistyped, or the note was deleted.</p>
+          <p class="lede" id="missing-text">The link may be mistyped, or the note was deleted.</p>
           <div class="actions">
+            <a class="btn primary" href="/login" id="missing-login" hidden>Sign in</a>
             <a class="btn primary" href="/" id="missing-home">Open Voice Notes</a>
           </div>
         </section>
@@ -241,6 +242,14 @@
             </div>
           </div>
           <p class="status-line" id="copy-status" role="status" aria-live="polite"></p>
+
+          <div class="share-row" id="share-row" role="group" aria-label="Sharing">
+            <p class="share-mode" id="share-mode" data-mode="private" role="status" aria-live="polite"></p>
+            <button type="button" class="btn small" id="share-toggle">Make public</button>
+            <button type="button" class="btn quiet small" id="share-token-new" title="A link with a secret in it, to give to one person who has no login">Create private link</button>
+            <button type="button" class="btn quiet small" id="share-token-copy" hidden>Copy private link</button>
+            <button type="button" class="btn quiet small" id="share-token-off" hidden>Remove private link</button>
+          </div>
 
           <div class="tabs" role="tablist" aria-label="Note content">
             <button role="tab" id="tab-notes" aria-controls="panel-notes" aria-selected="true" tabindex="0">Notes</button>

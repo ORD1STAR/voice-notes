@@ -891,3 +891,11 @@ kbd {
 .login-form input:hover { border-color: var(--ink); }
 .login-form .btn { margin-top: 0.4rem; }
 body.focus #logout { display: none; }
+
+/* ------------------------------------------------------------- share mode */
+
+.share-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; margin: 0.5rem 0 0; }
+.share-mode { margin: 0; font-size: 0.9rem; color: var(--muted); }
+.share-mode[data-mode="public"] { color: var(--ink); font-weight: 600; }
+body.focus .share-row { display: none !important; }
+@media print { .share-row { display: none !important; } }

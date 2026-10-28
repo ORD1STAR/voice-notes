@@ -34,6 +34,11 @@
     $("focus-bar").hidden = false;
   }
 
+  // A private note can be opened with a secret in the link (/n/<id>?t=<secret>) by someone who has no login.
+  var focusToken = "";
+  if (focusMode) { try { focusToken = new URLSearchParams(location.search).get("t") || ""; } catch (x) { focusToken = ""; } }
+  function tokenParam(first) { return focusToken ? (first ? "?" : "&") + "t=" + encodeURIComponent(focusToken) : ""; }
+
   var STEP_ORDER = ["upload", "converting", "transcribing", "structuring"];
   var AUDIO_EXT = /\.(mp3|m4a|wav|ogg|oga|opus|flac|aac|webm|mp4|m4v|mov|mkv|amr|3gp|wma|aiff?)$/i;
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -117,6 +122,7 @@
       return res.json().catch(function () { return {}; }).then(function (body) {
         var err = new Error(body.error || (body.detail && typeof body.detail === "string" ? body.detail : "The request failed (" + res.status + ")."));
         err.status = res.status;
+        err.isPrivate = !!body.private;
         throw err;
       });
     });
@@ -663,6 +669,7 @@
     $("copy-status").textContent = job.rebuild_error || "";
     selectTab("notes", false);
     updateExportLinks();
+    renderShare(job);
     show("result");
     setTitle(n.title + " - Voice Notes");
     markSeen(job.id);
@@ -672,7 +679,7 @@
     if (!currentId) return;
     var t = $("with-transcript").checked ? "&transcript=true" : "";
     ["pdf", "txt", "md"].forEach(function (f) {
-      $("exp-" + f).href = "/api/notes/" + currentId + "/export?format=" + f + t;
+      $("exp-" + f).href = "/api/notes/" + currentId + "/export?format=" + f + t + tokenParam(false);
     });
     var pdf = $("exp-pdf");
     var problem = currentJob && currentJob.pdf_problem;
@@ -749,7 +756,7 @@
 
   function copyLink() {
     if (!currentId) return;
-    var url = location.origin + "/n/" + currentId;
+    var url = location.origin + "/n/" + currentId + tokenParam(true);
     copyText(url, "Link copied.", "Copy is not available here. The link is " + url, function () {
       var top = $("share-top");
       top.textContent = "Link copied";
@@ -758,6 +765,69 @@
     });
   }
   $("share").addEventListener("click", copyLink);
+
+  /* ---------- share mode ---------- */
+
+  function renderShare(job) {
+    var pub = job.share === "public";
+    var token = job.share_token || "";
+    $("share-row").hidden = focusMode;
+    var text = pub ? "Sharing: Public. Anyone with the link can read this note."
+      : "Sharing: Private. The link opens for you only" + (token ? ", and for anyone you gave the private link." : ".");
+    $("share-mode").textContent = text;
+    $("share-mode").setAttribute("data-mode", pub ? "public" : "private");
+    $("share-toggle").textContent = pub ? "Make private" : "Make public";
+    $("share-token-new").hidden = pub;
+    $("share-token-new").textContent = token ? "New private link" : "Create private link";
+    $("share-token-copy").hidden = pub || !token;
+    $("share-token-off").hidden = pub || !token;
+  }
+
+  function shareCall(path, method, body, done) {
+    if (!currentId) return;
+    var opts = { method: method };
+    if (body) { opts.headers = { "Content-Type": "application/json" }; opts.body = JSON.stringify(body); }
+    ["share-toggle", "share-token-new", "share-token-copy", "share-token-off"].forEach(function (i) { $(i).disabled = true; });
+    api("/api/notes/" + currentId + path, opts).then(function (r) { return r.json(); }).then(function (job) {
+      if (!currentJob) return;
+      currentJob.share = job.share;
+      currentJob.share_token = job.share_token;
+      renderShare(currentJob);
+      done(job);
+    }).catch(function (err) {
+      $("copy-status").textContent = err.message;
+    }).then(function () {
+      ["share-toggle", "share-token-new", "share-token-copy", "share-token-off"].forEach(function (i) { $(i).disabled = false; });
+    });
+  }
+
+  function privateLink() { return location.origin + "/n/" + currentId + "?t=" + encodeURIComponent(currentJob.share_token); }
+
+  $("share-toggle").addEventListener("click", function () {
+    if (!currentJob) return;
+    var mode = currentJob.share === "public" ? "private" : "public";
+    shareCall("/share", "PUT", { mode: mode }, function (job) {
+      $("copy-status").textContent = job.share === "public"
+        ? "This note is now public: anyone with the link can read it."
+        : "This note is now private: the link opens for you only.";
+    });
+  });
+  $("share-token-new").addEventListener("click", function () {
+    shareCall("/share/token", "POST", null, function () {
+      copyText(privateLink(), "Private link copied. Anyone who has it can read this note without signing in.",
+        "Copy is not available here. The private link is " + privateLink());
+    });
+  });
+  $("share-token-copy").addEventListener("click", function () {
+    if (!currentJob || !currentJob.share_token) return;
+    copyText(privateLink(), "Private link copied. Anyone who has it can read this note without signing in.",
+      "Copy is not available here. The private link is " + privateLink());
+  });
+  $("share-token-off").addEventListener("click", function () {
+    shareCall("/share/token", "DELETE", null, function () {
+      $("copy-status").textContent = "The private link no longer works.";
+    });
+  });
   $("share-top").addEventListener("click", copyLink);
 
   /* ---------- renaming ---------- */
@@ -1336,15 +1406,20 @@
     if (pollTimer) { clearTimeout(pollTimer); pollTimer = null; }
   }
 
-  function showMissing() {
+  function showMissing(isPrivate) {
     stopPolling();
     $("share-top").hidden = true;
-    setTitle("Note not found - Voice Notes");
+    $("missing-title").textContent = isPrivate ? "This note is private" : "This note does not exist";
+    $("missing-text").textContent = isPrivate
+      ? "Only the owner can open this link. If the note is yours, sign in first. Otherwise ask the owner for a public link."
+      : "The link may be mistyped, or the note was deleted.";
+    $("missing-login").hidden = !isPrivate;
+    setTitle((isPrivate ? "Private note" : "Note not found") + " - Voice Notes");
     show("missing");
   }
 
   function poll(id) {
-    api("/api/notes/" + id).then(function (r) { return r.json(); }).then(function (job) {
+    api("/api/notes/" + id + tokenParam(true)).then(function (r) { return r.json(); }).then(function (job) {
       if (id !== currentId) return;
       pollFailures = 0;
       if (job.status === "done" && job.notes) {
@@ -1358,6 +1433,7 @@
       }
     }).catch(function (err) {
       if (id !== currentId) return;
+      if (err.status === 403 && err.isPrivate) { showMissing(true); return; }
       if (err.status === 404) {
         if (focusMode) showMissing(); else showError("This note does not exist anymore.", false, false);
         return;

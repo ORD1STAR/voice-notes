@@ -1,6 +1,7 @@
 """FastAPI application: upload, status, export."""
 import io
 import logging
+import hmac
 import re
 import time
 import zipfile
@@ -62,11 +63,59 @@ def _is_public(method: str, path: str) -> bool:
             or bool(_SHARE_READS.fullmatch(path)))
 
 
+def _caller(request: Request) -> str | None:
+    """The account that sent the request, or None for a visitor without a session. There is one account for now;
+    with more accounts this is the one place that maps a session to its owner."""
+    if auth.auth_disabled():
+        return jobs.OWNER
+    if auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME)):
+        return jobs.OWNER
+    return None
+
+
+PRIVATE_MESSAGE = "This note is private. Only its owner can open it. Sign in as the owner, or ask for a public link."
+
+
+class PrivateNote(Exception):
+    """A visitor asked for a private note without the right to read it."""
+
+
+@app.exception_handler(PrivateNote)
+async def private_note(_: Request, __: PrivateNote):
+    return JSONResponse({"error": PRIVATE_MESSAGE, "private": True}, status_code=403,
+                        headers={"Cache-Control": "no-store"})
+
+
+def _own(request: Request, job_id: str, message: str = "This note does not exist.") -> dict:
+    """The note, if it belongs to the signed in account. Another account sees it as not existing."""
+    job = jobs.get(job_id)
+    if not job or jobs.owner_of(job) != request.state.owner:
+        raise HTTPException(404, message)
+    return job
+
+
+def _readable(request: Request, job_id: str, token: str = "") -> tuple[dict, bool]:
+    """The note for a read through the share link, and whether the reader is its owner.
+
+    The owner reads any of their notes. Everyone else reads a public note, or a private note with its link secret."""
+    job = jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "This note does not exist.")
+    if request.state.owner is not None and jobs.owner_of(job) == request.state.owner:
+        return job, True
+    if jobs.share_of(job) == "public":
+        return job, False
+    secret = job.get("share_token")
+    if secret and token and hmac.compare_digest(str(secret).encode(), token.encode()):
+        return job, False
+    raise PrivateNote()
+
+
 @app.middleware("http")
 async def require_login(request: Request, call_next):
-    if auth.auth_disabled() or _is_public(request.method, request.url.path):
-        return await call_next(request)
-    if auth.configured() and auth.valid_session(request.cookies.get(auth.COOKIE_NAME)):
+    request.state.owner = _caller(request)
+    # The share reads pass here; the handler decides by the share mode of the note.
+    if request.state.owner is not None or _is_public(request.method, request.url.path):
         return await call_next(request)
     if request.url.path.startswith("/api/"):
         return JSONResponse({"error": "Sign in required."}, status_code=401, headers={"Cache-Control": "no-store"})
@@ -162,10 +211,17 @@ def _clean(job: dict) -> dict:
     return {**job, "notes": structure.unspoken_notes(job["notes"])}
 
 
-def _public(job: dict) -> dict:
-    """The job as the browser sees it. The transcript and diagrams come with finished notes only."""
+def _public(job: dict, owner_view: bool = True) -> dict:
+    """The job as the browser sees it. The transcript and diagrams come with finished notes only.
+    The owner field and the link secret go to the owner only."""
     job = _clean(job)
     out = dict(job)
+    out["share"] = jobs.share_of(job)
+    if owner_view:
+        out["owner"] = jobs.owner_of(job)
+    else:
+        out.pop("owner", None)
+        out.pop("share_token", None)
     out["pdf_problem"] = export.pdf_problem(job) if job.get("status") == "done" and job.get("notes") else None
     out["language"] = languages.lenient(job.get("language"))  # notes saved before the language field are automatic
     out["language_name"] = languages.name(out["language"])
@@ -212,7 +268,7 @@ async def create_note(request: Request, file: UploadFile = File(...), language: 
         raise HTTPException(413, f"The file is larger than {limit // (1024 * 1024)} MB.")
 
     name = re.sub(r"[\x00-\x1f/\\]", "", file.filename or "recording").strip() or "recording"
-    job = jobs.new_job(name, lang)
+    job = jobs.new_job(name, lang, request.state.owner)
     dest = jobs.upload_path(job["id"])
     size = 0
     try:
@@ -236,16 +292,14 @@ async def create_note(request: Request, file: UploadFile = File(...), language: 
 
 
 @app.get("/api/notes")
-def list_notes(q: str = ""):
-    return jobs.list_jobs(q[:200])
+def list_notes(request: Request, q: str = ""):
+    return jobs.list_jobs(q[:200], request.state.owner)
 
 
 @app.get("/api/notes/{job_id}")
-def get_note(job_id: str):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "This note does not exist.")
-    return _public(job)
+def get_note(request: Request, job_id: str, t: str = ""):
+    job, is_owner = _readable(request, job_id, t)
+    return _public(job, is_owner)
 
 
 class RenameBody(BaseModel):
@@ -253,7 +307,8 @@ class RenameBody(BaseModel):
 
 
 @app.patch("/api/notes/{job_id}")
-def rename_note(job_id: str, body: RenameBody):
+def rename_note(request: Request, job_id: str, body: RenameBody):
+    _own(request, job_id, "This note does not exist or is not finished yet.")
     try:
         job = jobs.rename(job_id, body.title)
     except ValueError as exc:
@@ -264,10 +319,10 @@ def rename_note(job_id: str, body: RenameBody):
 
 
 @app.get("/api/tasks")
-def list_tasks():
+def list_tasks(request: Request):
     """The action items of every finished note, newest note first. The tick boxes are kept in the browser."""
     out = []
-    for job in jobs.done_jobs():
+    for job in jobs.done_jobs(request.state.owner):
         notes = _clean(job).get("notes") or {}
         actions = [str(a).strip() for a in notes.get("actions") or [] if str(a).strip()]
         if actions:
@@ -281,7 +336,8 @@ class PinBody(BaseModel):
 
 
 @app.put("/api/notes/{job_id}/pin")
-def pin_note(job_id: str, body: PinBody):
+def pin_note(request: Request, job_id: str, body: PinBody):
+    _own(request, job_id, "This note does not exist or is not finished yet.")
     """Keep a finished note at the top of the list (or let it go back to its place by date)."""
     job = jobs.set_pinned(job_id, body.pinned)
     if job is None:
@@ -298,8 +354,9 @@ class EditBody(BaseModel):
 
 
 @app.put("/api/notes/{job_id}/notes")
-def edit_note(job_id: str, body: EditBody):
+def edit_note(request: Request, job_id: str, body: EditBody):
     """Replace the text of a finished note with the version the reader corrected."""
+    _own(request, job_id, "This note does not exist or is not finished yet.")
     try:
         job = jobs.edit_notes(job_id, body.model_dump())
     except ValueError as exc:
@@ -310,44 +367,72 @@ def edit_note(job_id: str, body: EditBody):
 
 
 @app.post("/api/notes/{job_id}/retry", status_code=202)
-def retry_note(job_id: str):
-    if not jobs.get(job_id):
-        raise HTTPException(404, "This note does not exist.")
+def retry_note(request: Request, job_id: str):
+    _own(request, job_id)
     if not jobs.retry(job_id):
         raise HTTPException(409, "This note cannot be tried again. Upload the recording once more.")
     return {"id": job_id}
 
 
 @app.post("/api/notes/{job_id}/restructure", status_code=202)
-def restructure_note(job_id: str):
-    if not jobs.get(job_id):
-        raise HTTPException(404, "This note does not exist.")
+def restructure_note(request: Request, job_id: str):
+    _own(request, job_id)
     if not jobs.restructure(job_id):
         raise HTTPException(409, "These notes cannot be rebuilt: the note is not finished or has no transcript.")
     return {"id": job_id}
 
 
 @app.post("/api/notes/{job_id}/seen", status_code=204)
-def seen_note(job_id: str):
+def seen_note(request: Request, job_id: str):
     """The reader opened this note: the sidebar stops flagging it as new."""
+    _own(request, job_id)
     if not jobs.mark_seen(job_id):
         raise HTTPException(404, "This note does not exist.")
     return Response(status_code=204)
 
 
 @app.delete("/api/notes/{job_id}", status_code=204)
-def delete_note(job_id: str):
+def delete_note(request: Request, job_id: str):
+    _own(request, job_id, "This note does not exist or is still being processed.")
     if not jobs.delete(job_id):
         raise HTTPException(404, "This note does not exist or is still being processed.")
     return Response(status_code=204)
 
 
+class ShareBody(BaseModel):
+    mode: str
+
+
+@app.put("/api/notes/{job_id}/share")
+def set_share_mode(request: Request, job_id: str, body: ShareBody):
+    """Switch the note between private (the link opens for the owner only) and public (anyone with the link)."""
+    _own(request, job_id)
+    try:
+        job = jobs.set_share(job_id, body.mode)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    return _public(job)
+
+
+@app.post("/api/notes/{job_id}/share/token")
+def make_share_token(request: Request, job_id: str):
+    """Create (or replace) the secret that lets one person open a private note by link, without a login."""
+    _own(request, job_id)
+    return _public(jobs.set_share_token(job_id, True))
+
+
+@app.delete("/api/notes/{job_id}/share/token")
+def remove_share_token(request: Request, job_id: str):
+    _own(request, job_id)
+    return _public(jobs.set_share_token(job_id, False))
+
+
 @app.get("/api/export/all")
-def export_all(format: str = "md", transcript: bool = False):
+def export_all(request: Request, format: str = "md", transcript: bool = False):
     """A ZIP with one Markdown (or text) file per finished note, as a backup or to move the notes elsewhere."""
     if format not in ("md", "txt"):
         raise HTTPException(400, "Format must be txt or md.")
-    rows = [_clean(j) for j in jobs.done_jobs()]
+    rows = [_clean(j) for j in jobs.done_jobs(request.state.owner)]
     if not rows:
         raise HTTPException(404, "There are no finished notes yet.")
     buffer = io.BytesIO()
@@ -371,10 +456,8 @@ def export_all(format: str = "md", transcript: bool = False):
 
 
 @app.get("/api/notes/{job_id}/export")
-def export_note(job_id: str, format: str = "md", transcript: bool = False):
-    job = jobs.get(job_id)
-    if not job:
-        raise HTTPException(404, "This note does not exist.")
+def export_note(request: Request, job_id: str, format: str = "md", transcript: bool = False, t: str = ""):
+    job, _ = _readable(request, job_id, t)
     job = _clean(job)
     if format not in export.FORMATS:
         raise HTTPException(400, "Format must be pdf, txt or md.")

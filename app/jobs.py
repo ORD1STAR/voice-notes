@@ -2,6 +2,7 @@
 import json
 import logging
 import re
+import secrets
 import shutil
 import threading
 import time
@@ -15,11 +16,38 @@ STAGES = ["queued", "converting", "transcribing", "structuring", "done"]
 KEEP_FAILED_UPLOADS_DAYS = 7
 MAX_TITLE = 100
 
+# Every note belongs to one account. There is a single owner account for now; the field is a plain string so that
+# more accounts can be added later without changing the notes.
+OWNER = "owner"
+# private: the share link opens for the signed in owner only. public: anyone with the link can read the note.
+SHARE_MODES = ("private", "public")
+
 log = logging.getLogger("voice_notes.jobs")
 
 _lock = threading.RLock()
 _jobs: dict[str, dict] = {}
 _worker_slot = threading.Semaphore(1)  # one job at a time keeps the CPU free for the local model
+
+
+def normalize(job: dict) -> dict:
+    """Fill in the fields that notes saved before they existed do not have (in memory; the file is not touched).
+
+    An old note belongs to the owner and is private. The file is rewritten only when the note is saved for some
+    other reason."""
+    if not job.get("owner"):
+        job["owner"] = OWNER
+    if job.get("share") not in SHARE_MODES:
+        job["share"] = "private"
+    job.setdefault("share_token", None)
+    return job
+
+
+def share_of(job: dict) -> str:
+    return job.get("share") if job.get("share") in SHARE_MODES else "private"
+
+
+def owner_of(job: dict) -> str:
+    return job.get("owner") or OWNER
 
 
 def _job_dir(job_id: str) -> Path:
@@ -73,10 +101,11 @@ def load_all() -> None:
                 elif job.get("retryable") and not up.exists() and not job.get("transcript"):
                     job["retryable"] = False
             job.setdefault("seen", True)  # notes from before the field existed are not flagged as new
+            normalize(job)
             _jobs[job["id"]] = job
 
 
-def new_job(filename: str, language: str = "auto") -> dict:
+def new_job(filename: str, language: str = "auto", owner: str = OWNER) -> dict:
     job = {
         "id": uuid.uuid4().hex[:12],
         "filename": filename[:200],
@@ -96,6 +125,9 @@ def new_job(filename: str, language: str = "auto") -> dict:
         "engine_detail": None,
         "plan": None,
         "seen": False,  # becomes True once the note has been opened
+        "owner": owner,
+        "share": "private",
+        "share_token": None,
     }
     with _lock:
         _jobs[job["id"]] = job
@@ -106,13 +138,14 @@ def new_job(filename: str, language: str = "auto") -> dict:
 def get(job_id: str) -> dict | None:
     with _lock:
         job = _jobs.get(job_id)
-        return dict(job) if job else None
+        return normalize(dict(job)) if job else None
 
 
-def done_jobs() -> list[dict]:
-    """Copies of the finished notes, newest first (used for the backup of all notes)."""
+def done_jobs(owner: str | None = None) -> list[dict]:
+    """Copies of the finished notes of one owner, newest first (used for the backup and the task list)."""
     with _lock:
-        rows = [dict(j) for j in _jobs.values() if j.get("status") == "done" and j.get("notes")]
+        rows = [dict(j) for j in _jobs.values() if j.get("status") == "done" and j.get("notes")
+                and (owner is None or owner_of(j) == owner)]
     return sorted(rows, key=lambda j: j["created"], reverse=True)
 
 
@@ -132,7 +165,7 @@ def _summary_row(j: dict) -> dict:
     return {k: j[k] for k in ("id", "filename", "created", "status", "duration")} | {
         "title": (j.get("notes") or {}).get("title"),
         "unseen": j.get("status") == "done" and not j.get("seen", True),
-        "pinned": bool(j.get("pinned"))}
+        "pinned": bool(j.get("pinned")), "share": share_of(j)}
 
 
 def set_pinned(job_id: str, pinned: bool) -> dict | None:
@@ -145,6 +178,31 @@ def set_pinned(job_id: str, pinned: bool) -> dict | None:
             job["pinned"] = bool(pinned)
             _save(job)
         return dict(job)
+
+
+def set_share(job_id: str, mode: str) -> dict | None:
+    """Switch a note between private and public. Raises ValueError for any other mode, None if unknown."""
+    if mode not in SHARE_MODES:
+        raise ValueError("The share mode must be private or public.")
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        if share_of(job) != mode or job.get("share") != mode:
+            job["share"] = mode
+            _save(job)
+        return normalize(dict(job))
+
+
+def set_share_token(job_id: str, make: bool) -> dict | None:
+    """Create (or replace) the secret of the private link for one person, or remove it. None if unknown."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job:
+            return None
+        job["share_token"] = secrets.token_urlsafe(16) if make else None
+        _save(job)
+        return normalize(dict(job))
 
 
 def mark_seen(job_id: str) -> bool:
@@ -184,11 +242,12 @@ def _searchable(j: dict) -> list[tuple[str, str]]:
     return pieces
 
 
-def list_jobs(query: str = "") -> list[dict]:
-    """Notes, newest first. With a query, only notes that contain every word of it, with a snippet."""
+def list_jobs(query: str = "", owner: str | None = None) -> list[dict]:
+    """Notes of one owner, newest first. With a query, only notes that contain every word of it, with a snippet."""
     terms = [t for t in re.split(r"\s+", (query or "").lower().strip()) if t][:8]
     with _lock:
-        items = sorted(_jobs.values(), key=lambda j: j["created"], reverse=True)
+        items = sorted((j for j in _jobs.values() if owner is None or owner_of(j) == owner),
+                       key=lambda j: j["created"], reverse=True)
         rows = []
         for j in items:
             row = _summary_row(j)
