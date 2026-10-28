@@ -39,6 +39,7 @@
       <a class="btn primary new-note" href="#/" id="new-note">New note</a>
 
       <nav class="rail-list" aria-labelledby="side-title">
+        <a class="side-link" href="#/tasks" id="tasks-link">Open tasks</a>
         <h2 class="eyebrow" id="side-title">Your notes</h2>
         <div class="search">
           <label class="sr-only" for="search">Search your notes</label>
@@ -139,6 +140,7 @@
 
           <section class="recent" aria-labelledby="recent-title">
             <h2 class="eyebrow" id="recent-title">Recent notes</h2>
+            <a class="side-link" href="#/tasks" id="tasks-link-start">Open tasks from all your notes</a>
             <div class="search">
               <label class="sr-only" for="search-recent">Search your notes</label>
               <input type="search" id="search-recent" placeholder="Search notes" autocomplete="off" spellcheck="false">
@@ -197,12 +199,22 @@
           </div>
         </section>
 
+        <!-- Open tasks of all notes -->
+        <section id="view-tasks" aria-labelledby="tasks-title" hidden>
+          <p class="crumb"><a href="#/" id="tasks-back">All notes</a></p>
+          <h1 id="tasks-title" class="note-title" tabindex="-1">Open tasks</h1>
+          <p class="tasks-summary" id="tasks-summary" role="status" aria-live="polite"></p>
+          <label class="check" id="tasks-done-label"><input type="checkbox" id="tasks-show-done"> Show finished tasks</label>
+          <div id="tasks-list"></div>
+        </section>
+
         <!-- Result -->
         <section id="view-result" aria-labelledby="result-title" hidden>
           <p class="crumb"><a href="#/" id="back">All notes</a></p>
           <div class="title-row" id="title-row">
             <h1 id="result-title" class="note-title" tabindex="-1"></h1>
             <button type="button" class="btn quiet small" id="rename" aria-label="Rename this note">Rename</button>
+            <button type="button" class="btn quiet small" id="pin" title="Keep this note at the top of the list">Pin to top</button>
           </div>
           <form class="rename-form" id="rename-form" hidden>
             <label class="sr-only" for="rename-input">Note title</label>

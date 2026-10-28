@@ -383,6 +383,8 @@ h2 { font: 650 1.1rem/1.3 var(--sans); margin: 0 0 0.6rem; }
 .loading { color: var(--muted); margin: 0; }
 .row-sub { grid-column: 1 / -1; color: var(--muted); font-size: 0.78rem; overflow-wrap: anywhere; }
 .row-meta.bad { color: var(--danger); font-weight: 600; }
+.pin-tag { font-size: 0.68rem; font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink);
+  border: 1px solid var(--line-strong); border-radius: 999px; padding: 0 0.4rem; line-height: 1.35; }
 .recent .note-list a { border: 1px solid var(--line); background: var(--surface); margin-top: 0.4rem; }
 .recent .note-list { gap: 0; margin-top: 0.4rem; }
 
@@ -607,7 +609,7 @@ mark { background: var(--accent-soft); color: var(--ink); border-radius: 3px; pa
 #progress-method { margin: 1.5rem 0 0; }
 .elapsed { margin: 0.25rem 0 0; font: 400 0.85rem/1.4 var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
 
-.title-row { display: flex; align-items: flex-start; gap: 0.75rem; }
+.title-row { display: flex; align-items: flex-start; gap: 0.25rem 0.75rem; flex-wrap: wrap; }
 .title-row .note-title { flex: 0 1 auto; min-width: 0; overflow-wrap: anywhere; }
 .btn.small { min-height: 2.75rem; padding: 0.4rem 0.8rem; font-size: 0.85rem; margin-top: 0.45rem; }
 .rename-form { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin: 0 0 0.9rem; max-width: 40rem; }
@@ -742,7 +744,7 @@ body.focus .focus-bar {
 body.focus .focus-bar[hidden] { display: none; }
 body.focus .focus-bar .btn.small { margin-top: 0; min-height: 2.75rem; }
 body.focus .shell { grid-template-columns: minmax(0, 1fr); }
-body.focus .rail, body.focus .crumb, body.focus #rename, body.focus .toolbar-end, body.focus #share,
+body.focus .rail, body.focus .crumb, body.focus #rename, body.focus #pin, body.focus .toolbar-end, body.focus #share,
 body.focus #view-error .actions, body.focus #view-progress .method { display: none !important; }
 body.focus main { margin: 0 auto; max-width: 56rem; padding-top: 2rem; }
 @media (min-width: 40.01rem) { body.focus main { padding: 2.75rem 2.5rem 3.5rem; } body.focus .foot { padding-left: 2.5rem; padding-right: 2.5rem; } }
@@ -789,6 +791,29 @@ html { scroll-padding-top: 5rem; }
 .outline-list li { max-width: 100%; }
 #sections section, .summary, .keypoints, .actions-card, .glance { scroll-margin-top: 5rem; }
 #sections section:focus, .summary:focus, .keypoints:focus, .actions-card:focus, .glance:focus { outline: none; }
+
+.side-link {
+  display: flex;
+  align-items: center;
+  min-height: 2.75rem;
+  padding: 0 0.5rem;
+  font-size: 0.9rem;
+  font-weight: 600;
+  text-decoration: none;
+  color: var(--ink);
+  border-radius: 8px;
+}
+.side-link:hover { background: var(--accent-soft); }
+.side-link[aria-current="page"] { color: var(--accent); }
+.recent .side-link { padding: 0; margin-bottom: 0.25rem; color: var(--accent); }
+.recent .side-link:hover { background: transparent; text-decoration: underline; }
+.rail-list .side-link { margin-bottom: 0.25rem; }
+.tasks-summary { margin: 0 0 0.75rem; color: var(--muted); }
+#tasks-list { max-width: 44rem; }
+#tasks-list .task-group { margin-top: 1rem; }
+#tasks-list .task-note { color: var(--ink); text-decoration: none; overflow-wrap: anywhere; }
+#tasks-list .task-note:hover { text-decoration: underline; }
+body.focus .side-link { display: none !important; }
 
 .backup {
   display: inline-block;

@@ -91,6 +91,11 @@ class Settings:
         return os.environ.get("GROQ_POLISH", "1").strip().lower() not in ("0", "false", "no", "off")
 
     @property
+    def groq_tidy(self) -> bool:
+        """Rewrite the lines that still sound spoken (they say "you", ask a question, say "this note") in one more call."""
+        return os.environ.get("GROQ_TIDY", "1").strip().lower() not in ("0", "false", "no", "off")
+
+    @property
     def data_dir(self) -> Path:
         return Path(os.environ.get("DATA_DIR", BASE_DIR / "data"))
 

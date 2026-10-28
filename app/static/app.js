@@ -3,9 +3,9 @@
 
   var $ = function (id) { return document.getElementById(id); };
   var views = { start: $("view-start"), progress: $("view-progress"), error: $("view-error"), result: $("view-result"),
-    missing: $("view-missing") };
+    missing: $("view-missing"), tasks: $("view-tasks") };
   var focusTargets = { start: "start-title", progress: "progress-title", error: "error-title", result: "result-title",
-    missing: "missing-title" };
+    missing: "missing-title", tasks: "tasks-title" };
 
   var health = null;
   var maxBytes = 200 * 1024 * 1024;
@@ -43,6 +43,9 @@
   function show(name, focus) {
     Object.keys(views).forEach(function (k) { views[k].hidden = k !== name; });
     document.body.setAttribute("data-view", name);
+    ["tasks-link", "tasks-link-start"].forEach(function (id) {
+      if (name === "tasks") $(id).setAttribute("aria-current", "page"); else $(id).removeAttribute("aria-current");
+    });
     $("loading").hidden = true;
     if (focus !== false) {
       var el = $(focusTargets[name]);
@@ -617,6 +620,7 @@
     if (editing) setEditing(false);
     var n = job.notes;
     $("result-title").textContent = n.title;
+    setPinButton(!!job.pinned);
     closeRename(false);
     var engine = engineLabel(job.engine);
     var language = "Language: " + (job.language_name || "Auto");
@@ -797,6 +801,32 @@
       $("copy-status").textContent = err.message;
       closeRename(true);
     }).then(function () { $("rename-save").disabled = false; });
+  });
+
+  /* ---------- pinning ---------- */
+
+  function setPinButton(pinned) {
+    var b = $("pin");
+    b.textContent = pinned ? "Unpin" : "Pin to top";
+    b.title = pinned ? "Let this note go back to its place by date" : "Keep this note at the top of the list";
+  }
+
+  $("pin").addEventListener("click", function () {
+    if (!currentJob || !currentId) return;
+    var want = !currentJob.pinned;
+    $("pin").disabled = true;
+    api("/api/notes/" + currentId + "/pin", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned: want })
+    }).then(function (r) { return r.json(); }).then(function (job) {
+      currentJob.pinned = !!job.pinned;
+      setPinButton(currentJob.pinned);
+      $("copy-status").textContent = currentJob.pinned ? "Pinned to the top of the list." : "Unpinned.";
+      loadRecent();
+    }).catch(function (err) {
+      $("copy-status").textContent = err.message;
+    }).then(function () { $("pin").disabled = false; });
   });
 
   /* ---------- deleting ---------- */
@@ -1130,6 +1160,7 @@
         dot.title = "New, not opened yet";
         meta.appendChild(dot);
       }
+      if (it.pinned) meta.appendChild(el("span", "Pinned", "pin-tag"));
       meta.appendChild(document.createTextNode(state));
       a.appendChild(meta);
       if (terms.length && it.snippet) {
@@ -1210,6 +1241,93 @@
     });
   });
 
+  /* ---------- open tasks of all notes ---------- */
+
+  var tasksData = [];
+  var tasksTicket = 0;
+
+  // The count line follows the boxes as they are ticked; the rows stay where they are until the page is opened again.
+  function updateTaskCounts() {
+    var open = 0, notes = 0, total = 0;
+    tasksData.forEach(function (n) {
+      var done = storedChecks(n.id);
+      var left = n.actions.filter(function (t) { return done.indexOf(t) < 0; }).length;
+      total += n.actions.length;
+      open += left;
+      if (left) notes += 1;
+      var group = document.querySelector('#tasks-list .task-group[data-id="' + n.id + '"]');
+      if (group) group.querySelector(".glance-note").textContent = left + " of " + n.actions.length + " open";
+    });
+    $("tasks-summary").textContent = !total ? "No tasks yet. Tasks found in your notes are listed here."
+      : !open ? "Nothing left to do."
+      : open + (open === 1 ? " open task" : " open tasks") + " in " + notes + (notes === 1 ? " note" : " notes");
+    $("tasks-done-label").hidden = !total;
+  }
+
+  function renderTasks() {
+    var showDone = $("tasks-show-done").checked;
+    var host = $("tasks-list");
+    host.textContent = "";
+    tasksData.forEach(function (n) {
+      var done = storedChecks(n.id);
+      var rows = n.actions.filter(function (t) { return showDone || done.indexOf(t) < 0; });
+      if (!rows.length) return;
+      var card = el("section", null, "actions-card task-group");
+      card.setAttribute("data-id", n.id);
+      var head = el("div", null, "glance-head");
+      var h = el("h2", null, "eyebrow");
+      var a = el("a", n.title, "task-note");
+      a.href = "#/note/" + n.id;
+      a.setAttribute("dir", "auto");
+      h.appendChild(a);
+      head.appendChild(h);
+      head.appendChild(el("p", "", "glance-note"));
+      card.appendChild(head);
+      var ul = el("ul", null, "todo");
+      rows.forEach(function (text) {
+        var li = el("li");
+        var label = el("label");
+        var box = el("input");
+        box.type = "checkbox";
+        box.checked = done.indexOf(text) >= 0;
+        box.addEventListener("change", function () {
+          var now = storedChecks(n.id).filter(function (t) { return t !== text; });
+          if (box.checked) now.push(text);
+          saveChecks(n.id, now);
+          updateTaskCounts();
+        });
+        label.appendChild(box);
+        label.appendChild(el("span", text));
+        li.appendChild(label);
+        ul.appendChild(li);
+      });
+      card.appendChild(ul);
+      host.appendChild(card);
+    });
+    updateTaskCounts();
+  }
+
+  function showTasks() {
+    currentId = null;
+    currentJob = null;
+    setTitle("Open tasks - Voice Notes");
+    var ticket = ++tasksTicket;
+    $("tasks-summary").textContent = "Loading the tasks";
+    $("tasks-list").textContent = "";
+    $("tasks-done-label").hidden = true;
+    show("tasks", !firstRoute);
+    api("/api/tasks").then(function (r) { return r.json(); }).then(function (data) {
+      if (ticket !== tasksTicket) return;
+      tasksData = data;
+      renderTasks();
+    }).catch(function () {
+      if (ticket !== tasksTicket) return;
+      $("tasks-summary").textContent = "The tasks could not be loaded. Reload the page to try again.";
+    });
+  }
+
+  $("tasks-show-done").addEventListener("change", renderTasks);
+
   /* ---------- polling and routing ---------- */
 
   function stopPolling() {
@@ -1272,6 +1390,11 @@
     if (focusMode) { routeShared(); return; }
     stopPolling();
     setTitle("Voice Notes");
+    if (location.hash === "#/tasks" && !uploading) {
+      showTasks();
+      loadRecent();
+      return;
+    }
     var m = /^#\/note\/([a-f0-9]+)$/.exec(location.hash);
     if (m) {
       currentId = m[1];

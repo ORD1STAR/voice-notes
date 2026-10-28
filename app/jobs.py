@@ -131,7 +131,20 @@ def queue_ahead(job_id: str) -> int:
 def _summary_row(j: dict) -> dict:
     return {k: j[k] for k in ("id", "filename", "created", "status", "duration")} | {
         "title": (j.get("notes") or {}).get("title"),
-        "unseen": j.get("status") == "done" and not j.get("seen", True)}
+        "unseen": j.get("status") == "done" and not j.get("seen", True),
+        "pinned": bool(j.get("pinned"))}
+
+
+def set_pinned(job_id: str, pinned: bool) -> dict | None:
+    """Pin a finished note to the top of the list, or unpin it. None if the note is unknown or not finished."""
+    with _lock:
+        job = _jobs.get(job_id)
+        if not job or job["status"] != "done" or not job.get("notes"):
+            return None
+        if bool(job.get("pinned")) != bool(pinned):
+            job["pinned"] = bool(pinned)
+            _save(job)
+        return dict(job)
 
 
 def mark_seen(job_id: str) -> bool:
@@ -196,9 +209,11 @@ def list_jobs(query: str = "") -> list[dict]:
                 row["_rank"] = 0 if title_hit else 1
             rows.append(row)
     if terms:
-        rows.sort(key=lambda r: r["_rank"])  # stable: newest first inside each group
+        rows.sort(key=lambda r: (r["_rank"], not r["pinned"]))  # stable: newest first inside each group
         for r in rows:
             r.pop("_rank")
+    else:
+        rows.sort(key=lambda r: not r["pinned"])  # pinned notes first, newest first inside each group
     return rows
 
 

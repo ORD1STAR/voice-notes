@@ -648,6 +648,26 @@ def _prev_subject(prev: str) -> str:
     return text if run[0][:1].isupper() else "the " + text
 
 
+def _antecedent(source: str, verb: str) -> str:
+    """The thing "it" most likely stands for in `source`: its first noun phrase that is not the task's own verb.
+
+    "The shed roof leaks, so we should fix it" gives "the shed roof" and "When to prune the apple tree" gives "the
+    apple tree" for "prune it". Empty when there is no candidate, in which case "it" stays as it was said.
+    """
+    stem = _stem(verb.lower())
+    for run in _runs(source):
+        if any(_stem(w.lower()) == stem for w in run):
+            continue
+        words = run[:2]
+        if words:
+            return " ".join(words) if words[0][:1].isupper() else "the " + " ".join(words)
+    return ""
+
+
+def _is_task_sentence(sentence: str) -> bool:
+    return bool(_SELF.search(sentence) or _REMIND.search(sentence))
+
+
 def _task_text(sentence: str, prev: str = "") -> tuple[str, str]:
     """The task a sentence sets, worded as an instruction ("Call Anna about the delivery"), and its kind.
 
@@ -692,7 +712,7 @@ def _task_text(sentence: str, prev: str = "") -> tuple[str, str]:
             if len(text.split()) < 3:
                 return "", ""
             text = text.rstrip(".!")
-            return _clip(cond + (text if not cond else text[:1].lower() + text[1:]), 160), "romance"
+            return _clip(cond + (text[:1].upper() + text[1:] if not cond else text[:1].lower() + text[1:]), 160), "romance"
     if not text and not cond:
         first = s.split(" ", 1)[0].lower().strip(",.")
         if first in _IMPERATIVE and len(s.split()) >= 2:
@@ -718,7 +738,8 @@ def _task_text(sentence: str, prev: str = "") -> tuple[str, str]:
     else:
         m = re.match(r"(\w+)\s+(it|that|this)\b(.*)$", text, re.IGNORECASE)
         if m and m.group(1).lower() not in {"do", "make", "get", "have", "let"}:
-            subject = _prev_subject(prev)
+            # the clause in front of the task first, then the sentence before it unless that one is a task itself
+            subject = _antecedent(pre, m.group(1)) or ("" if _is_task_sentence(prev) else _antecedent(prev, m.group(1)))
             if subject:
                 text = f"{m.group(1)} {subject}{m.group(3)}"
     text = text[:1].upper() + text[1:]
@@ -1399,6 +1420,7 @@ def _structure_pieces(
     review: Callable[[dict, str], dict] | None = None,
     final: Callable[[str, list[str], list[str]], dict] | None = None,
     polish: Callable[[dict], dict] | None = None,
+    tidy: Callable[[dict], dict] | None = None,
 ) -> tuple[dict, int]:
     """Structure a transcript piece by piece with a model. Returns (notes, number of pieces done by the rules).
 
@@ -1427,17 +1449,30 @@ def _structure_pieces(
     fallback_pieces = 0
 
     def polished(notes: dict) -> dict:
-        """The last editing pass on the wording of the finished note. A pass that fails keeps the notes as they are."""
-        if polish is None or fallback_pieces >= n:
+        """The last editing passes on the wording of the finished note. A pass that fails keeps the notes as they are.
+
+        `polish` edits the whole note. `tidy` then rewrites the few lines that still sound spoken; it makes no call
+        when there are none.
+        """
+        if (polish is None and tidy is None) or fallback_pieces >= n:
             return notes
-        notify(total - 1, total, "polishing the wording")
+        if polish is not None:
+            notify(total - 1, total, "polishing the wording")
         try:
-            return polish(notes) or notes
-        except (StructureError, ValueError, TypeError, KeyError, AttributeError) as exc:
-            log.info("final editing pass skipped, the notes are kept (%s)", exc)
+            if polish is not None:
+                try:
+                    notes = polish(notes) or notes
+                except (StructureError, ValueError, TypeError, KeyError, AttributeError) as exc:
+                    log.info("final editing pass skipped, the notes are kept (%s)", exc)
+            if tidy is not None:
+                try:
+                    notes = tidy(notes) or notes
+                except (StructureError, ValueError, TypeError, KeyError, AttributeError, IndexError) as exc:
+                    log.info("spoken-wording pass skipped, the notes are kept (%s)", exc)
             return notes
         finally:
-            notify(total, total)
+            if polish is not None:
+                notify(total, total)
 
     streak = 0
     review_misses = 0
@@ -1698,6 +1733,104 @@ GROQ_POLISH_PROMPT = (
 
 def groq_polish_prompt(language: str = "auto") -> str:
     return GROQ_POLISH_PROMPT.format(language_rule=_language_rule(language))
+
+
+GROQ_TIDY_PROMPT = (
+    "You edit single lines of written notes that were made from a spoken voice note. Each line you receive still "
+    "sounds spoken: it may speak to a listener (\"you\", \"tu\", \"vous\"), ask a question, say \"I\" or "
+    "\"let us\", refer to \"this note\" or to the recording, or make sense only when heard.\n"
+    "Rules:\n"
+    "- Rewrite every line as a plain statement in the style of a written document: impersonal, one complete "
+    "sentence that can be understood alone, in the same language.\n"
+    "- A request to a listener or an assistant becomes its topic or the question itself without a question mark "
+    "(\"How the pump works\"). A question becomes a statement of the matter (\"Whether the launch moves to May\").\n"
+    "- A line that only talks to the listener or about the recording and carries no fact becomes an empty string.\n"
+    "- Keep every fact, name, number and date exactly as written, add nothing, and do not merge, split or reorder "
+    "lines. A task keeps its first person only when it names who does it; otherwise it starts with a verb.\n"
+    "- {language_rule}\n"
+    "Return one JSON object with the key \"lines\": a list with one object for every line you received, each with "
+    "\"id\" (the same number) and \"text\" (the rewritten line). Answer with the JSON object only."
+)
+
+
+def groq_tidy_prompt(language: str = "auto") -> str:
+    return GROQ_TIDY_PROMPT.format(language_rule=_language_rule(language))
+
+
+MAX_TIDY_LINES = 40
+
+
+def _speech_lines(notes: dict) -> list[tuple[tuple, str]]:
+    """The lines of the notes that still read like talk, each with its place: summary, key point, task or bullet."""
+    found: list[tuple[tuple, str]] = []
+    if speech.has_speech(notes.get("summary") or ""):
+        found.append((("summary",), notes["summary"]))
+    for i, k in enumerate(notes.get("key_points") or []):
+        if speech.has_speech(str(k)):
+            found.append((("key", i), str(k)))
+    for i, a in enumerate(notes.get("actions") or []):
+        if speech.has_speech(str(a), first_person=False):  # a task may say "I"
+            found.append((("action", i), str(a)))
+    for si, sec in enumerate(notes.get("sections") or []):
+        for bi, b in enumerate(sec.get("bullets") or []):
+            if speech.has_speech(str(b)):
+                found.append((("bullet", si, bi), str(b)))
+    return found[:MAX_TIDY_LINES]
+
+
+def _apply_tidy(notes: dict, found: list[tuple[tuple, str]], answer, src: "_Source") -> dict:
+    """Put the rewritten lines into a copy of the notes. A line is only replaced when the new text is checked against
+    the transcript (names, figures, wording) and no longer reads like talk; otherwise the old line stays."""
+    if not isinstance(answer, list):
+        return notes
+    said: dict[int, str] = {}
+    for item in answer:
+        if isinstance(item, dict) and isinstance(item.get("text"), str):
+            try:
+                said[int(item.get("id"))] = item["text"]
+            except (TypeError, ValueError):
+                continue
+    out = json.loads(json.dumps(notes))
+    drop: set[tuple[int, int]] = set()
+    changed = 0
+    for n, (where, old) in enumerate(found):
+        if n not in said:
+            continue
+        kind = where[0]
+        new = _tidy(said[n]) if said[n].strip() else ""
+        if not new:
+            if kind == "bullet" and len(old.split()) <= 10:  # a bullet that was only talk
+                drop.add((where[1], where[2]))
+                changed += 1
+            continue
+        if new == old or len(new.split()) < 2:
+            continue
+        if not (src.numbers_ok(new, True) and src.names_ok(new) and src.support(new) >= 0.3):
+            continue
+        if speech.has_speech(new, first_person=kind != "action"):
+            continue
+        if kind == "summary":
+            out["summary"] = new
+        elif kind == "key":
+            out["key_points"][where[1]] = new
+        elif kind == "action":
+            out["actions"][where[1]] = new
+        else:
+            out["sections"][where[1]]["bullets"][where[2]] = new
+        changed += 1
+    if not changed:
+        return notes
+    if drop:
+        sections = []
+        for si, sec in enumerate(out["sections"]):
+            bullets = [b for bi, b in enumerate(sec["bullets"]) if (si, bi) not in drop]
+            if bullets:
+                sections.append({**sec, "bullets": bullets})
+        if sections:
+            out["sections"] = sections
+        else:
+            return notes
+    return out
 
 
 # The whole transcript is shown to the final editor when it is not longer than this.
@@ -1975,6 +2108,20 @@ def structure_groq(
             edited["key_points"] = notes.get("key_points", [])
         return edited
 
+    tidy_system = groq_tidy_prompt(language)
+
+    def tidy(notes: dict) -> dict:
+        found = _speech_lines(notes)
+        if not found:
+            return notes
+        parts = [label]
+        if len(text) <= POLISH_TRANSCRIPT_CHARS:
+            parts.append(f"Transcript:\n{text}")
+        parts.append("Lines (JSON):\n" + json.dumps([{"id": n, "text": t} for n, (_, t) in enumerate(found)],
+                                                    ensure_ascii=False))
+        raw = _groq_chat(model, tidy_system, "\n\n".join(parts), optional=True)
+        return _apply_tidy(notes, found, raw.get("lines"), _Source(text, lang))
+
     return _structure_pieces(
         text,
         GROQ_PIECE_CHARS,
@@ -1985,6 +2132,7 @@ def structure_groq(
         review=review if settings.groq_review else None,
         final=final,
         polish=polish if settings.groq_polish else None,
+        tidy=tidy if settings.groq_tidy else None,
     )
 
 

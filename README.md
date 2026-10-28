@@ -25,6 +25,8 @@ I built it for my own use: I record ideas while walking, and I want to find clea
 - Export to PDF, TXT or Markdown, with or without the full transcript (split into readable paragraphs).
 - Edit notes: correct the title, summary, key points, action items and every section in the browser before you share them. One point per line; sections can be added and removed. The edited text is what the exports contain. A rebuild writes the notes again from the transcript and replaces your edits, and asks first.
 - Rename a note, and search all your notes (titles, summaries, bullets, action items, file names and the full transcript) from the list.
+- Open tasks: one page ("Open tasks" in the sidebar, or on the start page on a phone, address `#/tasks`) that gathers the action items of all finished notes, grouped by note with the title as a link to it. Tick a task there or in its note: the tick is the same one (kept in your browser). Finished tasks are hidden until you ask for them, and the counts follow the ticks.
+- Pin a note to the top of the list ("Pin to top" next to the title, "Unpin" to let it go back to its place by date). Pinned notes are marked "Pinned" in the list and stay first, newest first among themselves; in a search the title matches still come first. The pin is kept on the server and is not shown on the share page.
 - Live progress through each step, with the time spent on the current step, the place in the queue and a clear statement of how the notes are built. When Ollama is not available the page says so, and why.
 - A note that failed because of a temporary problem (the transcription service did not answer, the server restarted) can be tried again without uploading the file once more. The recording is kept for a week for that purpose, or until the note is deleted.
 - Share link: every finished note has a link (`/n/<id>`, the "Copy link" button next to the export buttons) that opens the note full screen, without the sidebar, the recorder or any editing control. It has the summary, key points, sections, actions, diagrams, the transcript tab and the PDF, Markdown and text exports, follows the light or dark setting and prints cleanly. A note that is still being made shows its progress there and turns into the note by itself. **The link is a secret address: anyone who has it can read the note (and download its exports), and there is no password.** Only put the app behind a network or a login you trust before you send links around. An unknown link shows "This note does not exist". The page is marked `noindex`.
@@ -96,11 +98,12 @@ All three engines produce the same shape: title, summary, key points, sections w
 
 ### Notes that read like notes
 
-Three layers keep the speech out of the notes.
+Four layers keep the speech out of the notes.
 
 1. **The prompts** (Groq writer, Groq reviewer, the local model) say that the notes are a document about the subject and not a record of the recording: a request to a listener or an assistant becomes the topic or the question itself ("How X works"), "in this note", "as I said" and questions to the listener are left out, and "this" or "it" is replaced by the noun so that each bullet can be read alone.
 2. **A final editing pass (Groq).** When every part is written, checked and reviewed, and the parts are merged, one more call gives the whole note to the model with the transcript (when it is not longer than 14000 characters). The model may change wording, headings and order, never facts. The result goes through the same checks as a draft (a number or a name that is not in the recording is removed) and is only used when it is not clearly worse (more than a third of the bullets lost, figures lost, tasks lost, wrong language). If the pass fails for any reason the note is kept as it was. It costs one more call per note. Set `GROQ_POLISH=0` to skip it.
-3. **A deterministic scrubber** (`app/speech.py`) that works on every engine's output, including the rules and notes saved earlier. It rewrites "Explique moi comment...", "Tell me about...", "Peux-tu...", "Can you please..." into the content, drops leading "Ecoute,", "Listen,", "Look,", trailing "tu vois", "you know what I mean", whole sentences that are only framing ("Voila.", "As I said before.", "In this note I am going to talk about...") and, for French and Spanish, fillers such as "euh", "du coup", "en fait", "je pense que" and repeated starts ("c'est que, c'est que"). It is written for English, French and Spanish; other languages rely on the prompts.
+3. **A deterministic scrubber** (`app/speech.py`) that works on every engine's output, including the rules and notes saved earlier. It rewrites "Explique moi comment...", "Tell me about...", "Peux-tu...", "Can you please..." into the content, drops leading "Ecoute,", "Listen,", "Look,", trailing "tu vois", "you know what I mean", whole sentences that are only framing ("Voila.", "As I said before.", "In this note I am going to talk about...") and, for French and Spanish, fillers such as "euh", "du coup", "en fait", "je pense que" and repeated starts ("c'est que, c'est que"). It also drops leading discourse markers ("Okay so, the thing is,", "So basically what I want to say is that", "Bon, ben,", "Donc voila, en gros", "Bueno, pues, como te decia,", "To sum up,", "As I said before,"), greetings, and sentences about the recording or the act of speaking ("Thanks for listening.", "Hello, it is Anna speaking.", "This is a note for myself", "I'm recording this on my phone", "Merci d'avoir ecoute", "Hmm, let me see, where was I"), keeps what follows a change of subject ("Moving on to the next topic: pricing" gives "Pricing") and turns "Can you explain how X works?", "I want you to explain ..." and "Tu peux me dire combien ..." into the question itself. A plain request for an action ("Can you call Paul tomorrow?") becomes the instruction ("Call Paul tomorrow."). It is written for English, French and Spanish; other languages rely on the prompts.
+4. **A wording pass for what is left (Groq).** A rule check (`speech.has_speech`) finds the lines that still read like talk after everything above: they speak to "you" or "tu" and "vous", ask a question, say "let's", mention "this note" or the recording, or use "I" outside the action items. Only those lines (at most 40) are sent, with the transcript when it is not longer than 14000 characters, in one extra call that asks for a plain, impersonal sentence for each. A rewrite replaces the line only when its names and figures are in the recording, its words are supported by it and it no longer sounds spoken; a line that was only talk can be dropped. When no line is left there is no call, and a failed call keeps the notes as they were. Set `GROQ_TIDY=0` to skip it.
 
 ### Review pass and final call (Groq)
 
@@ -120,9 +123,10 @@ Settings (environment variables):
 | --- | --- | --- |
 | `GROQ_REVIEW` | `1` | `0`, `false`, `no` or `off` turns the review pass off (one call per part). |
 | `GROQ_POLISH` | `1` | `0`, `false`, `no` or `off` turns off the final editing pass on the wording of the whole note (one call per note). |
+| `GROQ_TIDY` | `1` | `0`, `false`, `no` or `off` turns off the wording pass for lines that still sound spoken (at most one extra call per note, none when no line needs it). |
 | `GROQ_CHAT_MAX_TOKENS` | `4096` | Longest answer asked from the chat model, kept between 512 and 8192. |
 
-The review doubles the number of chat calls, and the final editing pass adds one more per note. On the free Groq tier a rate limit is retried twice (waiting as long as
+The review doubles the number of chat calls, and the final editing pass adds one more per note (the wording pass adds one only when some line still sounds spoken). On the free Groq tier a rate limit is retried twice (waiting as long as
 Groq asks, at most 20 seconds); a review that would have to wait longer is skipped. Set `GROQ_REVIEW=0` if you are
 often rate limited. The local Ollama model is not affected: it stays single pass.
 
@@ -188,6 +192,8 @@ The app has no login. Anyone who can reach the port can upload files and spend y
 | `POST` | `/api/notes/{id}/seen` | Mark a finished note as opened (204, 404 for an unknown note; safe to repeat). The list rows (`GET /api/notes`) carry `unseen: true` for finished notes that were never opened. |
 | `GET` | `/api/notes/{id}/export?format=pdf\|txt\|md&transcript=true` | Download an export. A PDF of a note written mostly in a script the PDF fonts cannot draw (Arabic, Hebrew, Chinese, Japanese, Korean, Thai, Indic) is refused with status 422 and a message; Markdown and text always work. |
 | `GET` | `/api/export/all?format=md\|txt&transcript=true` | A ZIP with one file per finished note (newest first, the file names start with the date). 404 when there is no finished note, 400 for another format. |
+| `GET` | `/api/tasks` | The action items of every finished note: a list of `{id, title, created, pinned, actions}`, newest note first, notes without tasks left out. Notes written by an engine have their spoken framing removed; notes you edited are returned as you wrote them. |
+| `PUT` | `/api/notes/{id}/pin` | Pin a finished note to the top of the list or unpin it: `{"pinned": true}`. Returns the note (404 for an unknown or unfinished note, 422 for a body without a true or false `pinned`). The list rows and the note carry `pinned`. |
 | `DELETE` | `/api/notes/{id}` | Delete a note. |
 
 The page itself is also served at `/n/<id>` (the share link) for any id; the script shows the note, or a friendly message when there is no such note. These responses carry `X-Robots-Tag: noindex, nofollow`.
@@ -206,7 +212,7 @@ playwright install chromium
 pytest tests/e2e
 ```
 
-They cover the outline, the shortcuts and the backup link, renaming, searching, key points, the checklist, rebuilding notes, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
+They cover the outline, the shortcuts and the backup link, renaming, pinning, the open tasks page, searching, key points, the checklist, rebuilding notes, retrying, the status text and the queue message, upload validation, the full upload to export flow (PDF, TXT and Markdown downloads), error screens, keyboard use, recording with a fake microphone, text contrast in light and dark mode, and the layout at desktop, tablet and phone widths: nothing may overflow, and the text of every diagram is measured to sit inside its box and keep readable contrast. Set `SCREENSHOT_DIR` to save screenshots of each screen.
 
 ## Project layout
 
@@ -217,7 +223,7 @@ app/
   audio.py        ffmpeg conversion and chunking
   transcribe.py   Groq Whisper client
   languages.py    the languages of the start page
-  speech.py       removes spoken framing and French or Spanish fillers from sentences
+  speech.py       removes spoken framing and French or Spanish fillers from sentences, and finds lines that still sound spoken
   structure.py    Groq and Ollama structuring, the checks on model output and the rule-based fallback
   visuals.py      mind map, process and chart drawings built from the notes
   export.py       PDF, TXT and Markdown output

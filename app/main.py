@@ -78,6 +78,7 @@ def _public(job: dict) -> dict:
     out["pdf_problem"] = export.pdf_problem(job) if job.get("status") == "done" and job.get("notes") else None
     out["language"] = languages.lenient(job.get("language"))  # notes saved before the language field are automatic
     out["language_name"] = languages.name(out["language"])
+    out["pinned"] = bool(job.get("pinned"))
     out["ahead"] = jobs.queue_ahead(job["id"]) if job.get("status") in ("queued", "processing") else 0
     out["stage_elapsed"] = max(0, round(time.time() - job.get("stage_started", time.time())))
     if job.get("status") == "done" and job.get("notes"):
@@ -166,6 +167,32 @@ def rename_note(job_id: str, body: RenameBody):
         job = jobs.rename(job_id, body.title)
     except ValueError as exc:
         raise HTTPException(400, str(exc))
+    if job is None:
+        raise HTTPException(404, "This note does not exist or is not finished yet.")
+    return _public(job)
+
+
+@app.get("/api/tasks")
+def list_tasks():
+    """The action items of every finished note, newest note first. The tick boxes are kept in the browser."""
+    out = []
+    for job in jobs.done_jobs():
+        notes = _clean(job).get("notes") or {}
+        actions = [str(a).strip() for a in notes.get("actions") or [] if str(a).strip()]
+        if actions:
+            out.append({"id": job["id"], "title": notes.get("title") or job.get("filename") or "", "created": job["created"],
+                        "pinned": bool(job.get("pinned")), "actions": actions})
+    return out
+
+
+class PinBody(BaseModel):
+    pinned: bool
+
+
+@app.put("/api/notes/{job_id}/pin")
+def pin_note(job_id: str, body: PinBody):
+    """Keep a finished note at the top of the list (or let it go back to its place by date)."""
+    job = jobs.set_pinned(job_id, body.pinned)
     if job is None:
         raise HTTPException(404, "This note does not exist or is not finished yet.")
     return _public(job)

@@ -36,6 +36,9 @@ def env(tmp_path, monkeypatch):
     # The final editing pass is one more chat call; the tests that count calls leave it off, the tests of the
     # pass itself turn it on.
     monkeypatch.setenv("GROQ_POLISH", "0")
+    # The wording pass only calls the model for lines that still sound spoken; it is off here and turned on by the
+    # tests of that pass.
+    monkeypatch.setenv("GROQ_TIDY", "0")
     monkeypatch.setenv("GROQ_CHAT_URL", "http://127.0.0.1:9/openai/v1/chat/completions")
     monkeypatch.setenv("GROQ_MODELS_URL", "http://127.0.0.1:9/openai/v1/models")
     monkeypatch.delenv("GROQ_CHAT_MODEL", raising=False)
